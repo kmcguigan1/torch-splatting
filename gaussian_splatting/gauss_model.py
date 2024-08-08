@@ -2,7 +2,7 @@ import torch
 import torch.nn  as nn
 import numpy as np
 import math
-from simple_knn._C import distCUDA2
+from gaussian_splatting.utils.distcuda2 import distCUDA2
 from gaussian_splatting.utils.point_utils import PointCloud
 from gaussian_splatting.gauss_render import strip_symmetric, inverse_sigmoid, build_scaling_rotation
 from gaussian_splatting.utils.sh_utils import RGB2SH

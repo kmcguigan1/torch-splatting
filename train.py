@@ -78,7 +78,10 @@ class GSSTrainer(Trainer):
 if __name__ == "__main__":
     device = 'cuda'
     folder = './B075X65R3X'
-    data = read_all(folder, resize_factor=0.5)
+    data = read_all(folder, resize_factor=0.25)
+    print(type(data))
+    print(data.keys())
+    print(len(data.keys()))
     data = {k: v.to(device) for k, v in data.items()}
     data['depth_range'] = torch.Tensor([[1,3]]*len(data['rgb'])).to(device)
 
