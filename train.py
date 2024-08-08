@@ -1,3 +1,4 @@
+import os
 import torch
 import numpy as np
 import gaussian_splatting.utils as utils
@@ -29,6 +30,7 @@ class GSSTrainer(Trainer):
         camera = self.data['camera'][ind]
         rgb = self.data['rgb'][ind]
         depth = self.data['depth'][ind]
+
         mask = (self.data['alpha'][ind] > 0.5)
         if USE_GPU_PYTORCH:
             camera = to_viewpoint_camera(camera)
@@ -59,6 +61,7 @@ class GSSTrainer(Trainer):
         import matplotlib.pyplot as plt
         ind = np.random.choice(len(self.data['camera']))
         camera = self.data['camera'][ind]
+
         if USE_GPU_PYTORCH:
             camera = to_viewpoint_camera(camera)
 
@@ -79,9 +82,6 @@ if __name__ == "__main__":
     device = 'cuda'
     folder = './B075X65R3X'
     data = read_all(folder, resize_factor=0.25)
-    print(type(data))
-    print(data.keys())
-    print(len(data.keys()))
     data = {k: v.to(device) for k, v in data.items()}
     data['depth_range'] = torch.Tensor([[1,3]]*len(data['rgb'])).to(device)
 
@@ -97,15 +97,17 @@ if __name__ == "__main__":
         'white_bkgd': True,
     }
 
+    results_folder = 'result/test'
+    os.makedirs(results_folder, exist_ok=True)
     trainer = GSSTrainer(model=gaussModel, 
         data=data,
         train_batch_size=1, 
-        train_num_steps=25000,
+        train_num_steps=15000,
         i_image =100,
         train_lr=1e-3, 
         amp=False,
-        fp16=False,
-        results_folder='result/test',
+        fp16=True,
+        results_folder=results_folder,
         render_kwargs=render_kwargs,
     )
 
