@@ -163,12 +163,12 @@ class GaussRenderer(nn.Module):
         self.pix_coord = torch.stack(torch.meshgrid(torch.arange(128), torch.arange(128), indexing='xy'), dim=-1).to('cuda')
         
     
-    def build_color(self, means3D, shs, camera):
-        rays_o = camera.camera_center
-        rays_d = means3D - rays_o
-        color = eval_sh(self.active_sh_degree, shs.permute(0,2,1), rays_d)
-        color = (color + 0.5).clip(min=0.0)
-        return color
+    # def build_color(self, means3D, shs, camera):
+    #     rays_o = camera.camera_center
+    #     rays_d = means3D - rays_o
+    #     color = eval_sh(self.active_sh_degree, shs.permute(0,2,1), rays_d)
+    #     color = (color + 0.5).clip(min=0.0)
+    #     return color
     
     def render(self, camera, means2D, cov2d, color, opacity, depths):
         radii = get_radius(cov2d)
@@ -228,7 +228,7 @@ class GaussRenderer(nn.Module):
         opacity = pc.get_opacity
         scales = pc.get_scaling
         rotations = pc.get_rotation
-        shs = pc.get_features
+        color = pc.get_colors
         
         if USE_PROFILE:
             prof = profiler.record_function
@@ -243,8 +243,8 @@ class GaussRenderer(nn.Module):
             mean_view = mean_view[in_mask]
             depths = mean_view[:,2]
         
-        with prof("build color"):
-            color = self.build_color(means3D=means3D, shs=shs, camera=camera)
+        # with prof("build color"):
+        #     color = self.build_color(means3D=means3D, shs=shs, camera=camera)
         
         with prof("build cov3d"):
             cov3d = build_covariance_3d(scales, rotations)

@@ -90,7 +90,7 @@ if __name__ == "__main__":
     raw_points = points.random_sample(2**14)
     # raw_points.write_ply(open('points.ply', 'wb'))
 
-    gaussModel = GaussModel(sh_degree=4, debug=False)
+    gaussModel = GaussModel(debug=False)
     gaussModel.create_from_pcd(pcd=raw_points)
     
     render_kwargs = {

@@ -38,11 +38,13 @@ class GaussModel(nn.Module):
         self.opacity_activation = torch.sigmoid
         self.inverse_opacity_activation = inverse_sigmoid
 
+        self.color_activation = torch.sigmoid
+        self.inverse_color_activation = inverse_sigmoid
+
         self.rotation_activation = torch.nn.functional.normalize
     
-    def __init__(self, sh_degree : int=3, debug=False):
+    def __init__(self, debug=False):
         super(GaussModel, self).__init__()
-        self.max_sh_degree = sh_degree  
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
@@ -60,28 +62,24 @@ class GaussModel(nn.Module):
         colors = pcd.select_channels(['R', 'G', 'B']) / 255.
 
         fused_point_cloud = torch.tensor(np.asarray(points)).float().cuda()
-        fused_color = RGB2SH(torch.tensor(np.asarray(colors)).float().cuda())
+        colors = torch.tensor(np.asarray(colors)).float().cuda()
+        colors = self.inverse_color_activation(colors)
 
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
-
-        features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
-        features[:, :3, 0 ] = fused_color
-        features[:, 3:, 1:] = 0.0
 
         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(points)).float().cuda()), 0.0000001)
         scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
         rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
         rots[:, 0] = 1
-        opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
+        opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
         if self.debug:
             # easy for visualization
             colors = np.zeros_like(colors)
-            opacities = inverse_sigmoid(0.9 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
+            opacities = self.inverse_opacity_activation(0.9 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
-        self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
-        self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
+        self._colors = nn.Parameter(colors.contiguous().requires_grad_(True))
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
@@ -101,10 +99,8 @@ class GaussModel(nn.Module):
         return self._xyz
     
     @property
-    def get_features(self):
-        features_dc = self._features_dc
-        features_rest = self._features_rest
-        return torch.cat((features_dc, features_rest), dim=1)
+    def get_colors(self):
+        return self.color_activation(self._colors)
     
     @property
     def get_opacity(self):
@@ -119,8 +115,7 @@ class GaussModel(nn.Module):
         # os.makedirs(os.path.dirname(path), exist_ok=True)
         xyz = self._xyz.detach().cpu().numpy()
         normals = np.zeros_like(xyz)
-        f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
-        f_rest = self._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        colors = self._colors.detach().contiguous().cpu().numpy()
         opacities = self._opacity.detach().cpu().numpy()
         scale = self._scaling.detach().cpu().numpy()
         rotation = self._rotation.detach().cpu().numpy()
@@ -128,7 +123,7 @@ class GaussModel(nn.Module):
         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+        attributes = np.concatenate((xyz, normals, colors, opacities, scale, rotation), axis=1)
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
@@ -136,10 +131,8 @@ class GaussModel(nn.Module):
     def construct_list_of_attributes(self):
         l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
         # All channels except the 3 DC
-        for i in range(self._features_dc.shape[1]*self._features_dc.shape[2]):
-            l.append('f_dc_{}'.format(i))
-        for i in range(self._features_rest.shape[1]*self._features_rest.shape[2]):
-            l.append('f_rest_{}'.format(i))
+        for i in range(3):
+            l.append('color_{}'.format(i))
         l.append('opacity')
         for i in range(self._scaling.shape[1]):
             l.append('scale_{}'.format(i))
