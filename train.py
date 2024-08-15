@@ -102,7 +102,7 @@ if __name__ == "__main__":
     trainer = GSSTrainer(model=gaussModel, 
         data=data,
         train_batch_size=1, 
-        train_num_steps=15000,
+        train_num_steps=1,
         i_image =100,
         train_lr=1e-3, 
         amp=False,
@@ -111,5 +111,5 @@ if __name__ == "__main__":
         render_kwargs=render_kwargs,
     )
 
-    trainer.on_evaluate_step()
+    # trainer.on_evaluate_step()
     trainer.train()

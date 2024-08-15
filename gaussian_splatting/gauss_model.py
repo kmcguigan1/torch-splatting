@@ -67,7 +67,7 @@ class GaussModel(nn.Module):
 
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
-        dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(points)).float().cuda()), 0.0000001)
+        dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(points)).float().cuda()), 0.0000001) 
         scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
         rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
         rots[:, 0] = 1
@@ -78,12 +78,26 @@ class GaussModel(nn.Module):
             colors = np.zeros_like(colors)
             opacities = self.inverse_opacity_activation(0.9 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
+        # real space gaussians
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._colors = nn.Parameter(colors.contiguous().requires_grad_(True))
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self._xyz.shape[0]), device="cuda")
+
+        # negative alpha gaussians
+        n_negatives = int(fused_point_cloud.shape[0] * 0.05)
+        print(f"Number of negative gaussians {n_negatives}")
+
+        perm = torch.randperm(fused_point_cloud.shape[0])
+        negative_indecies = perm[:n_negatives]
+        negative_gaussian_points = fused_point_cloud[negative_indecies, ...]
+
+        self._neg_xyz = nn.Parameter(negative_gaussian_points.requires_grad_(True))
+        self._neg_scaling = nn.Parameter(torch.zeros(n_negatives, self._scaling.size(1), dtype=self._scaling.dtype, device="cuda").requires_grad_(True))
+        self._neg_rotation = nn.Parameter(torch.zeros(n_negatives, self._rotation.size(1), dtype=self._rotation.dtype, device="cuda").requires_grad_(True))
+        self._neg_opacity = nn.Parameter(torch.zeros(n_negatives, self._opacity.size(1), dtype=self._opacity.dtype, device="cuda").requires_grad_(True))
         return self
 
     @property
@@ -108,6 +122,25 @@ class GaussModel(nn.Module):
     
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
+    
+    @property
+    def get_negative_scaling(self):
+        return self.scaling_activation(self._neg_scaling)
+    
+    @property
+    def get_negative_rotation(self):
+        return self.rotation_activation(self._neg_rotation)
+    
+    @property
+    def get_negative_xyz(self):
+        return self._neg_xyz
+    
+    @property
+    def get_negative_opacity(self):
+        return self.opacity_activation(self._neg_opacity)
+    
+    def get_negative_covariance(self, scaling_modifier = 1):
+        return self.covariance_activation(self.get_negative_scaling, scaling_modifier, self._neg_rotation)
 
     def save_ply(self, path):
         from plyfile import PlyData, PlyElement

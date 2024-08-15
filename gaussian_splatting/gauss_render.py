@@ -4,6 +4,8 @@ import torch.nn as nn
 import math
 from einops import reduce
 
+from gaussian_splatting.gauss_model import GaussModel
+
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
 
@@ -66,16 +68,12 @@ def strip_lowerdiag(L):
 def strip_symmetric(sym):
     return strip_lowerdiag(sym)
 
-
-
 def build_covariance_3d(s, r):
     L = build_scaling_rotation(s, r)
     actual_covariance = L @ L.transpose(1, 2)
     return actual_covariance
     # symm = strip_symmetric(actual_covariance)
     # return symm
-
-
 
 def build_covariance_2d(
     mean3d, cov3d, viewmatrix, fov_x, fov_y, focal_x, focal_y
@@ -111,6 +109,47 @@ def build_covariance_2d(
     filter = torch.eye(2,2).to(cov2d) * 0.3
     return cov2d[:, :2, :2] + filter[None]
 
+def build_covariance_2d_and_return_depth_cov(
+    mean3d, cov3d, viewmatrix, fov_x, fov_y, focal_x, focal_y
+):
+    # The following models the steps outlined by equations 29
+	# and 31 in "EWA Splatting" (Zwicker et al., 2002). 
+	# Additionally considers aspect / scaling of viewport.
+	# Transposes used to account for row-/column-major conventions.
+    tan_fovx = math.tan(fov_x * 0.5)
+    tan_fovy = math.tan(fov_y * 0.5)
+    t = (mean3d @ viewmatrix[:3,:3]) + viewmatrix[-1:,:3]
+
+    # truncate the influences of gaussians far outside the frustum.
+    tx = (t[..., 0] / t[..., 2]).clip(min=-tan_fovx*1.3, max=tan_fovx*1.3) * t[..., 2]
+    ty = (t[..., 1] / t[..., 2]).clip(min=-tan_fovy*1.3, max=tan_fovy*1.3) * t[..., 2]
+    tz = t[..., 2]
+
+    # we need to get the transformed covariance first
+    # to do so we get the view matrix and transform the cov3d to be on the 
+    # same basis as the view matrix
+    # this is imperfect since the x, y covariance of this changes at the depths as well based on focal 
+    # stuff but this is an okay approximate for now
+    W = viewmatrix[:3,:3].T # transpose to correct viewmatrix
+    transformed_cov3d = W @ cov3d @ W.T
+    depth_variance = transformed_cov3d[..., 2, 2]
+
+    # Eq.29 locally affine transform 
+    # perspective transform is not affine so we approximate with first-order taylor expansion
+    # notice that we multiply by the intrinsic so that the variance is at the sceen space
+    J = torch.zeros(mean3d.shape[0], 3, 3).to(mean3d)
+    J[..., 0, 0] = 1 / tz * focal_x
+    J[..., 0, 2] = -tx / (tz * tz) * focal_x
+    J[..., 1, 1] = 1 / tz * focal_y
+    J[..., 1, 2] = -ty / (tz * tz) * focal_y
+    # J[..., 2, 0] = tx / t.norm(dim=-1) # discard
+    # J[..., 2, 1] = ty / t.norm(dim=-1) # discard
+    # J[..., 2, 2] = tz / t.norm(dim=-1) # discard
+    cov2d = J @ W @ cov3d @ W.T @ J.permute(0,2,1)
+    
+    # add low pass filter here according to E.q. 32
+    filter = torch.eye(2,2).to(cov2d) * 0.3
+    return cov2d[:, :2, :2] + filter[None], depth_variance
 
 def projection_ndc(points, viewmatrix, projmatrix):
     points_o = homogeneous(points) # object space
@@ -120,7 +159,6 @@ def projection_ndc(points, viewmatrix, projmatrix):
     p_view = points_o @ viewmatrix
     in_mask = p_view[..., 2] >= 0.2
     return p_proj, p_view, in_mask
-
 
 @torch.no_grad()
 def get_radius(cov2d):
@@ -170,9 +208,12 @@ class GaussRenderer(nn.Module):
     #     color = (color + 0.5).clip(min=0.0)
     #     return color
     
-    def render(self, camera, means2D, cov2d, color, opacity, depths):
+    def render(self, camera, means2D, cov2d, color, opacity, depths, neg_means2D, neg_cov2d, neg_depth_var, neg_opacity, neg_depths,):
         radii = get_radius(cov2d)
         rect = get_rect(means2D, radii, width=camera.image_width, height=camera.image_height)
+
+        neg_radii = get_radius(neg_cov2d)
+        neg_rect = get_rect(neg_means2D, neg_radii, width=camera.image_width, height=camera.image_height)
         
         self.render_color = torch.ones(*self.pix_coord.shape[:2], 3).to('cuda')
         self.render_depth = torch.zeros(*self.pix_coord.shape[:2], 1).to('cuda')
@@ -205,6 +246,18 @@ class GaussRenderer(nn.Module):
                     + dx[:,:,0]*dx[:,:,1] * sorted_conic[:, 0, 1]
                     + dx[:,:,0]*dx[:,:,1] * sorted_conic[:, 1, 0]))
                 
+                # check for the negative gaussians that are in this portion of the mask
+                neg_over_tl = neg_rect[0][..., 0].clip(min=w), neg_rect[0][..., 1].clip(min=h)
+                neg_over_br = neg_rect[1][..., 0].clip(max=w+TILE_SIZE-1), neg_rect[1][..., 1].clip(max=h+TILE_SIZE-1)
+                neg_in_mask = (neg_over_br[0] > neg_over_tl[0]) & (neg_over_br[1] > neg_over_tl[1]) # 3D gaussian in the tile 
+                
+                # make sure there are even negatives in this tile to evaluate
+                if(neg_in_mask.sum() > 0):
+                    # to start we will do the naive approach and just have all gaussians impact depth wise
+                    # in the future this should be changed to be tiled in the depth dimension as well
+                    # should be fine for rendering speed since the renderes in cuda are so fast anyways
+                    
+                
                 alpha = (gauss_weight[..., None] * sorted_opacity[None]).clip(max=0.99) # B P 1
                 T = torch.cat([torch.ones_like(alpha[:,:1]), 1-alpha[:,:-1]], dim=1).cumprod(dim=1)
                 acc_alpha = (alpha * T).sum(dim=1)
@@ -223,31 +276,60 @@ class GaussRenderer(nn.Module):
         }
 
 
-    def forward(self, camera, pc, **kwargs):
+    def forward(self, camera, pc:GaussModel, **kwargs):
         means3D = pc.get_xyz
         opacity = pc.get_opacity
         scales = pc.get_scaling
         rotations = pc.get_rotation
         color = pc.get_colors
+
+        # negative variables
+        neg_means3D = pc.get_negative_xyz
+        neg_opacity = pc.get_negative_opacity
+        neg_scales = pc.get_negative_scaling
+        neg_rotations = pc.get_negative_rotation
+
+        print(f"Initial number of points: {means3D.shape[0]}")
         
         if USE_PROFILE:
             prof = profiler.record_function
         else:
             prof = contextlib.nullcontext
             
-        with prof("projection"):
+        # if we are rendering and not training we should filter out the negative gaussians with low
+        # alpha values to make it faster to render
+
+        
+        with prof("positive projection"):
+            # get the positive projections
             mean_ndc, mean_view, in_mask = projection_ndc(means3D, 
                     viewmatrix=camera.world_view_transform, 
                     projmatrix=camera.projection_matrix)
             mean_ndc = mean_ndc[in_mask]
             mean_view = mean_view[in_mask]
             depths = mean_view[:,2]
+
+        with prof("negative projection"):
+            # get the negative projections
+            neg_mean_ndc, neg_mean_view, neg_in_mask = projection_ndc(neg_means3D, 
+                    viewmatrix=camera.world_view_transform, 
+                    projmatrix=camera.projection_matrix)
+            neg_mean_ndc = neg_mean_ndc[neg_in_mask]
+            neg_mean_view = neg_mean_view[neg_in_mask]
+            neg_depths = neg_mean_view[:,2]
+
+        # every point should be in the view since the default is that chair
+        # with a wide FOV camera angle
+        print(f"projected number of points: {mean_ndc.shape[0]}")
         
         # with prof("build color"):
         #     color = self.build_color(means3D=means3D, shs=shs, camera=camera)
         
         with prof("build cov3d"):
             cov3d = build_covariance_3d(scales, rotations)
+
+        with prof("build negative cov3d"):
+            neg_cov3d = build_covariance_3d(neg_scales, neg_rotations)
             
         with prof("build cov2d"):
             cov2d = build_covariance_2d(
@@ -262,6 +344,20 @@ class GaussRenderer(nn.Module):
             mean_coord_x = ((mean_ndc[..., 0] + 1) * camera.image_width - 1.0) * 0.5
             mean_coord_y = ((mean_ndc[..., 1] + 1) * camera.image_height - 1.0) * 0.5
             means2D = torch.stack([mean_coord_x, mean_coord_y], dim=-1)
+
+        with prof("build negative cov2d"):
+            neg_cov2d, neg_depth_var = build_covariance_2d_and_return_depth_cov(
+                mean3d=neg_means3D, 
+                cov3d=neg_cov3d, 
+                viewmatrix=camera.world_view_transform,
+                fov_x=camera.FoVx, 
+                fov_y=camera.FoVy, 
+                focal_x=camera.focal_x, 
+                focal_y=camera.focal_y)
+
+            neg_mean_coord_x = ((neg_mean_ndc[..., 0] + 1) * camera.image_width - 1.0) * 0.5
+            neg_mean_coord_y = ((neg_mean_ndc[..., 1] + 1) * camera.image_height - 1.0) * 0.5
+            neg_means2D = torch.stack([neg_mean_coord_x, neg_mean_coord_y], dim=-1)
         
         with prof("render"):
             rets = self.render(
@@ -271,6 +367,11 @@ class GaussRenderer(nn.Module):
                 color=color,
                 opacity=opacity, 
                 depths=depths,
+                neg_means2D=neg_means2D,
+                neg_cov2d=neg_cov2d,
+                neg_depth_var=neg_depth_var,
+                neg_opacity=neg_opacity, 
+                neg_depths=neg_depths,
             )
 
         return rets
