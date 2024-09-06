@@ -21,7 +21,8 @@ class GSSTrainer(Trainer):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.data = kwargs.get('data')
-        self.gaussRender = GaussRenderer(**kwargs.get('render_kwargs', {}))
+        self.ignore_negatives = kwargs.get('ignore_negatives', False)
+        self.gaussRender = GaussRenderer(**kwargs.get('render_kwargs', {}), ignore_negatives=self.ignore_negatives)
         self.lambda_dssim = 0.2
         self.lambda_depth = 0.0
     
@@ -56,6 +57,19 @@ class GSSTrainer(Trainer):
         log_dict = {'total': total_loss,'l1':l1_loss, 'ssim': ssim_loss, 'depth': depth_loss, 'psnr': psnr}
 
         return total_loss, log_dict
+    
+    def run_all_cameras(self):
+        import matplotlib.pyplot as plt
+        for ind in range(len(self.data['camera'])):
+            print("writting camera: ", ind)
+            camera = self.data['camera'][ind]
+
+            if USE_GPU_PYTORCH:
+                camera = to_viewpoint_camera(camera)
+
+            out = self.gaussRender(pc=self.model, camera=camera)
+            rgb_pd = out['render'].detach().cpu().numpy()
+            utils.imwrite(str(self.results_folder / f'image-{ind}.png'), rgb_pd)
 
     def on_evaluate_step(self, **kwargs):
         import matplotlib.pyplot as plt
@@ -77,8 +91,37 @@ class GSSTrainer(Trainer):
         image = np.concatenate([image, depth], axis=0)
         utils.imwrite(str(self.results_folder / f'image-{self.step}.png'), image)
 
+def manual_debug():
+    device = 'cuda'
+    folder = './B075X65R3X'
+    data = read_all(folder, resize_factor=0.25)
+    data = {k: v.to(device) for k, v in data.items()}
+    data['depth_range'] = torch.Tensor([[1,3]]*len(data['rgb'])).to(device)
 
-if __name__ == "__main__":
+    gaussModel = GaussModel(debug=False)
+    gaussModel.create_manually()
+
+    render_kwargs = {
+        'white_bkgd': True,
+    }
+
+    results_folder = 'result/test'
+    os.makedirs(results_folder, exist_ok=True)
+    trainer = GSSTrainer(model=gaussModel, 
+        data=data,
+        train_batch_size=1, 
+        train_num_steps=1,
+        i_image=1,
+        train_lr=1e-3, 
+        amp=False,
+        fp16=True,
+        results_folder=results_folder,
+        render_kwargs=render_kwargs,
+        ignore_negatives=False
+    )
+    trainer.run_all_cameras()
+
+def main():
     device = 'cuda'
     folder = './B075X65R3X'
     data = read_all(folder, resize_factor=0.25)
@@ -102,7 +145,7 @@ if __name__ == "__main__":
     trainer = GSSTrainer(model=gaussModel, 
         data=data,
         train_batch_size=1, 
-        train_num_steps=1,
+        train_num_steps=1000,
         i_image =100,
         train_lr=1e-3, 
         amp=False,
@@ -113,3 +156,7 @@ if __name__ == "__main__":
 
     # trainer.on_evaluate_step()
     trainer.train()
+
+
+if __name__ == "__main__":
+    manual_debug()

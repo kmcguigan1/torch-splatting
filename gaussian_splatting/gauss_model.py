@@ -54,6 +54,48 @@ class GaussModel(nn.Module):
         self.setup_functions()
         self.debug = debug
 
+    def create_manually(self):
+        """
+            create the guassian model from a manual setup
+        """
+        xyz = torch.tensor([[0.,0.,0.],[0.6,0.6,0.6]])
+        scaling = torch.log(torch.tensor([[2.0,2.0,2.0],[1.2,1.2,1.2]]))
+        rotation = torch.tensor([[0.1,0.1,0.1, 0.1],[0.1,0.1,0.1, 0.1]])
+        colors = torch.tensor([[0.9,0.,0.],[0.0,0.0,0.9]])
+        opacity = torch.tensor([[0.9,],[0.9,]])
+
+        scaling = self.scaling_inverse_activation(scaling)
+        colors = self.inverse_color_activation(colors)
+        opacity = self.inverse_opacity_activation(opacity)
+        
+        # create the positive gaussian xyz, scaling, rotation, color, opacity
+        self._xyz = nn.Parameter(xyz.requires_grad_(True))
+        self._colors = nn.Parameter(colors.contiguous().requires_grad_(True))
+        self._scaling = nn.Parameter(scaling.requires_grad_(True))
+        self._rotation = nn.Parameter(rotation.requires_grad_(True))
+        self._opacity = nn.Parameter(opacity.requires_grad_(True))
+        self.max_radii2D = torch.zeros((self._xyz.shape[0]), device="cuda")
+
+        neg_xyz = torch.tensor([[0.0,0.0,0.0],])
+        neg_scaling = torch.log(torch.tensor([[1.5,1.0,1.0],]))
+        neg_rotation = torch.tensor([[0.1,0.1,0.1, 0.1],])
+        neg_colors = torch.tensor([[0.9,0.,0.],])
+        neg_opacity = torch.tensor([[0.9,],])
+
+        neg_scaling = self.scaling_inverse_activation(neg_scaling)
+        neg_colors = self.inverse_color_activation(neg_colors)
+        neg_opacity = self.inverse_opacity_activation(neg_opacity)
+        
+        # create the positive gaussian xyz, scaling, rotation, color, opacity
+        self._neg_xyz = nn.Parameter(neg_xyz.requires_grad_(True))
+        self._neg_scaling = nn.Parameter(neg_scaling.requires_grad_(True))
+        self._neg_rotation = nn.Parameter(neg_rotation.requires_grad_(True))
+        self._neg_opacity = nn.Parameter(neg_opacity.requires_grad_(True))
+
+        return self
+
+
+
     def create_from_pcd(self, pcd:PointCloud):
         """
             create the guassian model from a color point cloud
@@ -86,14 +128,22 @@ class GaussModel(nn.Module):
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self._xyz.shape[0]), device="cuda")
 
+        print(self._xyz.shape)
+        print(self._colors.shape)
+        print(self._scaling.shape)
+        print(self._rotation.shape)
+        print(self._opacity.shape)
+
+
+
         # negative alpha gaussians
-        n_negatives = int(fused_point_cloud.shape[0] * 0.05)
+        n_negatives = int(fused_point_cloud.shape[0] * 0.1)
         print(f"Number of negative gaussians {n_negatives}")
 
         perm = torch.randperm(fused_point_cloud.shape[0])
         negative_indecies = perm[:n_negatives]
         negative_gaussian_points = fused_point_cloud[negative_indecies, ...]
-
+        # TODO: change scaling from being zero to random. We suspect zero causes not to show up.
         self._neg_xyz = nn.Parameter(negative_gaussian_points.requires_grad_(True))
         self._neg_scaling = nn.Parameter(torch.zeros(n_negatives, self._scaling.size(1), dtype=self._scaling.dtype, device="cuda").requires_grad_(True))
         self._neg_rotation = nn.Parameter(torch.zeros(n_negatives, self._rotation.size(1), dtype=self._rotation.dtype, device="cuda").requires_grad_(True))
