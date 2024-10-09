@@ -137,17 +137,23 @@ class GaussModel(nn.Module):
 
 
         # negative alpha gaussians
-        n_negatives = int(fused_point_cloud.shape[0] * 0.1)
+        # n_negatives = int(fused_point_cloud.shape[0] * 0.001)
+        n_negatives = 100
         print(f"Number of negative gaussians {n_negatives}")
 
         perm = torch.randperm(fused_point_cloud.shape[0])
         negative_indecies = perm[:n_negatives]
         negative_gaussian_points = fused_point_cloud[negative_indecies, ...]
+        negative_rots = torch.zeros(n_negatives, self._rotation.size(1), dtype=self._rotation.dtype, device="cuda")
+        negative_rots[:, 0] = 1
+        negative_opacity = torch.zeros(n_negatives, self._opacity.size(1), dtype=self._opacity.dtype, device="cuda") + 1e-3
+        negative_opacity = self.inverse_opacity_activation(negative_opacity)
+
         # TODO: change scaling from being zero to random. We suspect zero causes not to show up.
         self._neg_xyz = nn.Parameter(negative_gaussian_points.requires_grad_(True))
-        self._neg_scaling = nn.Parameter(torch.zeros(n_negatives, self._scaling.size(1), dtype=self._scaling.dtype, device="cuda").requires_grad_(True))
-        self._neg_rotation = nn.Parameter(torch.zeros(n_negatives, self._rotation.size(1), dtype=self._rotation.dtype, device="cuda").requires_grad_(True))
-        self._neg_opacity = nn.Parameter(torch.zeros(n_negatives, self._opacity.size(1), dtype=self._opacity.dtype, device="cuda").requires_grad_(True))
+        self._neg_scaling = nn.Parameter(torch.zeros(n_negatives, self._scaling.size(1), dtype=self._scaling.dtype, device="cuda").requires_grad_(True))-4
+        self._neg_rotation = nn.Parameter(negative_rots.requires_grad_(True))
+        self._neg_opacity = nn.Parameter(negative_opacity.requires_grad_(True))
         return self
 
     @property
