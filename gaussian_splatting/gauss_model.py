@@ -35,8 +35,9 @@ class GaussModel(nn.Module):
 
         self.covariance_activation = build_covariance_from_scaling_rotation
 
-        self.opacity_activation = torch.sigmoid
-        self.inverse_opacity_activation = inverse_sigmoid
+        #TODO: This need to change to tanh 
+        self.opacity_activation = torch.tanh
+        self.inverse_opacity_activation = torch.arctanh
 
         self.color_activation = torch.sigmoid
         self.inverse_color_activation = inverse_sigmoid
@@ -133,27 +134,6 @@ class GaussModel(nn.Module):
         print(self._scaling.shape)
         print(self._rotation.shape)
         print(self._opacity.shape)
-
-
-
-        # negative alpha gaussians
-        # n_negatives = int(fused_point_cloud.shape[0] * 0.001)
-        n_negatives = 100
-        print(f"Number of negative gaussians {n_negatives}")
-
-        perm = torch.randperm(fused_point_cloud.shape[0])
-        negative_indecies = perm[:n_negatives]
-        negative_gaussian_points = fused_point_cloud[negative_indecies, ...]
-        negative_rots = torch.zeros(n_negatives, self._rotation.size(1), dtype=self._rotation.dtype, device="cuda")
-        negative_rots[:, 0] = 1
-        negative_opacity = torch.zeros(n_negatives, self._opacity.size(1), dtype=self._opacity.dtype, device="cuda") + 1e-3
-        negative_opacity = self.inverse_opacity_activation(negative_opacity)
-
-        # TODO: change scaling from being zero to random. We suspect zero causes not to show up.
-        self._neg_xyz = nn.Parameter(negative_gaussian_points.requires_grad_(True))
-        self._neg_scaling = nn.Parameter(torch.zeros(n_negatives, self._scaling.size(1), dtype=self._scaling.dtype, device="cuda").requires_grad_(True))-4
-        self._neg_rotation = nn.Parameter(negative_rots.requires_grad_(True))
-        self._neg_opacity = nn.Parameter(negative_opacity.requires_grad_(True))
         return self
 
     @property
@@ -178,22 +158,6 @@ class GaussModel(nn.Module):
     
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
-    
-    @property
-    def get_negative_scaling(self):
-        return self.scaling_activation(self._neg_scaling)
-    
-    @property
-    def get_negative_rotation(self):
-        return self.rotation_activation(self._neg_rotation)
-    
-    @property
-    def get_negative_xyz(self):
-        return self._neg_xyz
-    
-    @property
-    def get_negative_opacity(self):
-        return self.opacity_activation(self._neg_opacity)
     
     def get_negative_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_negative_scaling, scaling_modifier, self._neg_rotation)

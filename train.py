@@ -73,8 +73,7 @@ class GSSTrainer(Trainer):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.data = kwargs.get('data')
-        self.ignore_negatives = kwargs.get('ignore_negatives', False)
-        self.gaussRender = GaussRenderer(**kwargs.get('render_kwargs', {}), ignore_negatives=self.ignore_negatives)
+        self.gaussRender = GaussRenderer(**kwargs.get('render_kwargs', {}))
         self.lambda_dssim = 0.2
         self.lambda_depth = 0.0
     
@@ -247,14 +246,13 @@ def main():
     trainer = GSSTrainer(model=gaussModel, 
         data=data,
         train_batch_size=1, 
-        train_num_steps=10,
+        train_num_steps=1000,
         i_image =100,
         train_lr=1e-3, 
         amp=False,
         fp16=True,
         results_folder=results_folder,
         render_kwargs=render_kwargs,
-        ignore_negatives=False
     )
 
     # trainer.on_evaluate_step()
