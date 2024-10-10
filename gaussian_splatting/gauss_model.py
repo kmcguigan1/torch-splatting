@@ -148,10 +148,11 @@ class GaussModel(nn.Module):
         negative_rots[:, 0] = 1
         negative_opacity = torch.zeros(n_negatives, self._opacity.size(1), dtype=self._opacity.dtype, device="cuda") + 1e-3
         negative_opacity = self.inverse_opacity_activation(negative_opacity)
+        negative_scales = torch.zeros(n_negatives, self._scaling.size(1), dtype=self._scaling.dtype, device="cuda") - 4
 
         # TODO: change scaling from being zero to random. We suspect zero causes not to show up.
         self._neg_xyz = nn.Parameter(negative_gaussian_points.requires_grad_(True))
-        self._neg_scaling = nn.Parameter(torch.zeros(n_negatives, self._scaling.size(1), dtype=self._scaling.dtype, device="cuda").requires_grad_(True))-4
+        self._neg_scaling = nn.Parameter(negative_scales.requires_grad_(True))
         self._neg_rotation = nn.Parameter(negative_rots.requires_grad_(True))
         self._neg_opacity = nn.Parameter(negative_opacity.requires_grad_(True))
         return self

@@ -262,7 +262,8 @@ class GaussRenderer(nn.Module):
                     + dx[:,:,0]*dx[:,:,1] * sorted_conic[:, 0, 1]
                     + dx[:,:,0]*dx[:,:,1] * sorted_conic[:, 1, 0]))
                 
-                alpha = (gauss_weight[..., None] * sorted_opacity[None]).clip(max=0.99) # Im P+ 1 (B P 1 old)
+                # alpha = (gauss_weight[..., None] * sorted_opacity[None]).clip(max=0.99) # Im P+ 1 (B P 1 old)
+                alpha = (gauss_weight[..., None] * sorted_opacity[None]) # Im P+ 1 (B P 1 old)
 
 
                 if(not self.ignore_negatives):
@@ -324,16 +325,18 @@ class GaussRenderer(nn.Module):
                         )) # Im P+ N- (N B P old)
 
                         # calculate the negative alpha of the gaussians
-                        neg_alpha = (neg_gauss_weight[..., None] * sel_neg_opacity[None]).clip(max=0.99) # Im P+ N- 1 (N B P 1 old)
+                        # neg_alpha = (neg_gauss_weight[..., None] * sel_neg_opacity[None]).clip(max=0.99) # Im P+ N- 1 (N B P 1 old)
+                        neg_alpha = (neg_gauss_weight[..., None] * sel_neg_opacity[None]) # Im P+ N- 1 (N B P 1 old)
+
                         neg_alpha = neg_alpha.sum(dim=2, keepdims=False) # Im P+ 1  (B P 1 old)
 
                         negative_impact_per_positive_gaussian += neg_alpha # Im P+ 1
 
                     # apply the negative gaussian alpha to the positive gaussians
                     alpha = alpha - negative_impact_per_positive_gaussian
-                    alpha = alpha.clip(min=0.01)
+                    # alpha = alpha.clip(min=0.01)
                         
-    
+                alpha = alpha.clip(max=0.99)
                 T = torch.cat([torch.ones_like(alpha[:,:1]), 1-alpha[:,:-1]], dim=1).cumprod(dim=1)
                 acc_alpha = (alpha * T).sum(dim=1)
                 tile_color = (T * alpha * sorted_color[None]).sum(dim=1) + (1-acc_alpha) * (1 if self.white_bkgd else 0)

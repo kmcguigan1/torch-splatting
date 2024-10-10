@@ -10,7 +10,7 @@ from gaussian_splatting.utils.camera_utils import to_viewpoint_camera
 from gaussian_splatting.utils.point_utils import get_point_clouds
 from gaussian_splatting.gauss_model import GaussModel
 from gaussian_splatting.gauss_render import GaussRenderer
-
+import torch.nn.functional as F
 import contextlib
 
 from torch.profiler import profile, ProfilerActivity
@@ -100,9 +100,9 @@ class GSSTrainer(Trainer):
             print(prof.key_averages(group_by_stack_n=True).table(sort_by='self_cuda_time_total', row_limit=20))
 
 
-        l1_loss = loss_utils.l1_loss(out['render'], rgb)
+        l1_loss = loss_utils.l1_loss(F.leaky_relu(out['render'],negative_slope=0.01), rgb)
         depth_loss = loss_utils.l1_loss(out['depth'][..., 0][mask], depth[mask])
-        ssim_loss = 1.0-loss_utils.ssim(out['render'], rgb)
+        ssim_loss = 1.0-loss_utils.ssim(F.relu(out['render']), rgb)
 
         total_loss = (1-self.lambda_dssim) * l1_loss + self.lambda_dssim * ssim_loss + depth_loss * self.lambda_depth
         psnr = utils.img2psnr(out['render'], rgb)
@@ -247,7 +247,7 @@ def main():
     trainer = GSSTrainer(model=gaussModel, 
         data=data,
         train_batch_size=1, 
-        train_num_steps=10,
+        train_num_steps=1000,
         i_image =100,
         train_lr=1e-3, 
         amp=False,
