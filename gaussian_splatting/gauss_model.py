@@ -35,16 +35,19 @@ class GaussModel(nn.Module):
 
         self.covariance_activation = build_covariance_from_scaling_rotation
 
-        #TODO: This need to change to tanh 
-        self.opacity_activation = torch.tanh
-        self.inverse_opacity_activation = torch.arctanh
+        if self.negative_gaussian:
+            self.opacity_activation = torch.tanh
+            self.inverse_opacity_activation = torch.arctanh
+        else:
+            self.opacity_activation = torch.sigmoid
+            self.inverse_opacity_activation = inverse_sigmoid
 
         self.color_activation = torch.sigmoid
         self.inverse_color_activation = inverse_sigmoid
 
         self.rotation_activation = torch.nn.functional.normalize
     
-    def __init__(self, debug=False):
+    def __init__(self, debug=False, negative_gaussian=False):
         super(GaussModel, self).__init__()
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
@@ -52,8 +55,9 @@ class GaussModel(nn.Module):
         self._scaling = torch.empty(0)
         self._rotation = torch.empty(0)
         self._opacity = torch.empty(0)
-        self.setup_functions()
         self.debug = debug
+        self.negative_gaussian = negative_gaussian
+        self.setup_functions()
 
     def create_manually(self):
         """

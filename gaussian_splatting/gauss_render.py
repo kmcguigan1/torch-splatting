@@ -189,13 +189,13 @@ class GaussRenderer(nn.Module):
     >>> out = gaussRender(pc=gaussModel, camera=camera)
     """
 
-    def __init__(self, active_sh_degree=3, white_bkgd=True, **kwargs):
+    def __init__(self, active_sh_degree=3, white_bkgd=True, negative_gaussian=False, **kwargs):
         super(GaussRenderer, self).__init__()
         self.active_sh_degree = active_sh_degree
         self.debug = False
         self.white_bkgd = white_bkgd
         self.pix_coord = torch.stack(torch.meshgrid(torch.arange(128), torch.arange(128), indexing='xy'), dim=-1).to('cuda')
-        
+        self.negative_gaussian = negative_gaussian
     
     # def build_color(self, means3D, shs, camera):
     #     rays_o = camera.camera_center
@@ -220,6 +220,8 @@ class GaussRenderer(nn.Module):
         TILE_SIZE = 32
         tile_stats = {'tile_negs':0, 'tiles':0, 'negs':0, 'pos':0}
 
+        tile_stats['pos'] = (opacity>0).sum()
+        tile_stats['negs'] = (opacity<0).sum()
 
         for h in range(0, camera.image_height, TILE_SIZE):
             for w in range(0, camera.image_width, TILE_SIZE):
@@ -239,7 +241,7 @@ class GaussRenderer(nn.Module):
                 g_pos_in_tile = g_in_tile_idx[opacity[g_in_tile_idx].flatten()>0]
 
                 P = len(g_pos_in_tile)
-                tile_stats['pos'] += P
+                # tile_stats['pos'] += P
 
                 # get the tile coordinates and sort the positive gaussians by depth
                 # this is done for traditional rasterization
@@ -268,76 +270,76 @@ class GaussRenderer(nn.Module):
                 # the gaus weights based on the spatial positioning of these gaussians
 
                 #TODO: here we only need to select the negative gaussian from in_mask
+                if self.negative_gaussian:
+                    g_in_tile_idx = torch.where(in_mask)[0]
+                    g_neg_in_tile = g_in_tile_idx[opacity[g_in_tile_idx].flatten()<0]
 
-                g_in_tile_idx = torch.where(in_mask)[0]
-                g_neg_in_tile = g_in_tile_idx[opacity[g_in_tile_idx].flatten()<0]
+                    NP = len(g_neg_in_tile)
+                    # print(opacity[g_neg_in_tile].flatten())
 
-                NP = len(g_neg_in_tile)
-                tile_stats['negs'] += NP
+                    if(NP > 0): 
+                        # tile_stats['negs'] += NP
+                        tile_stats['tile_negs'] += 1
 
-                if(NP == 0): continue
+                        # container for the negative gaussian impact
+                        negative_impact_per_positive_gaussian = torch.zeros_like(alpha)
 
-                tile_stats['tile_negs'] += 1
+                        # tile in the depth dimension
+                        N_NEGS_PER_TILE = 2
+                        depth_tile_count = math.ceil(NP / N_NEGS_PER_TILE)
 
-                # container for the negative gaussian impact
-                negative_impact_per_positive_gaussian = torch.zeros_like(alpha)
+                        for depth_idx in range(depth_tile_count):
+                            lower = depth_idx * N_NEGS_PER_TILE
+                            upper = (depth_idx + 1) * N_NEGS_PER_TILE
+                            upper = min(upper, NP)
+                            neg_in_mask_in_depth = g_neg_in_tile[lower:upper]
 
-                # tile in the depth dimension
-                N_NEGS_PER_TILE = 2
-                depth_tile_count = math.ceil(NP / N_NEGS_PER_TILE)
+                            # select the negative gaussians in the tile
+                            sel_neg_means2D = means2D[neg_in_mask_in_depth]
+                            sel_neg_cov3d = cov3d[neg_in_mask_in_depth]
+                            sel_neg_depths = depths[neg_in_mask_in_depth]
+                            sel_neg_opacity = opacity[neg_in_mask_in_depth]
+                            neg_conic = sel_neg_cov3d.inverse() # inverse of variance
 
-                for depth_idx in range(depth_tile_count):
-                    lower = depth_idx * N_NEGS_PER_TILE
-                    upper = (depth_idx + 1) * N_NEGS_PER_TILE
-                    upper = min(upper, NP)
-                    neg_in_mask_in_depth = g_neg_in_tile[lower:upper]
+                            # get the distances used for calculating the gaussian impact
+                            dx = (tile_coord[:,None,:] - sel_neg_means2D[None,:]) # Im N- 2 (N P 2 old)
+                            dx = dx.unsqueeze(1).expand(-1, P, -1, -1) # Im P+ N- 2 (N B P 2 old)
+                            dy = sorted_depths[:, None] - sel_neg_depths[None, :] # P+ N-
+                            dy = dy.unsqueeze(dim=0).unsqueeze(dim=-1) # Im(1) P+ N- 1
+                            dy = dy.expand(dx.shape[0], -1, -1, -1) # Im P+ N- 1
+                            dx = torch.cat((dx, dy), dim=-1) # Im P+ N- 3 (N B P 3 old)
 
-                    # select the negative gaussians in the tile
-                    sel_neg_means2D = means2D[neg_in_mask_in_depth]
-                    sel_neg_cov3d = cov3d[neg_in_mask_in_depth]
-                    sel_neg_depths = depths[neg_in_mask_in_depth]
-                    sel_neg_opacity = opacity[neg_in_mask_in_depth]
-                    neg_conic = sel_neg_cov3d.inverse() # inverse of variance
+                            # get the negative point spread
+                            neg_gauss_weight = torch.exp(-0.5 * (
+                                dx[...,0]**2 * neg_conic[:, 0, 0] 
+                                + dx[...,1]**2 * neg_conic[:, 1, 1]
+                                + dx[...,2]**2 * neg_conic[:, 2, 2]
+                                + dx[...,0]*dx[...,1] * neg_conic[:, 0, 1]
+                                + dx[...,0]*dx[...,2] * neg_conic[:, 0, 2]
+                                + dx[...,1]*dx[...,0] * neg_conic[:, 1, 0]
+                                + dx[...,1]*dx[...,2] * neg_conic[:, 1, 2]
+                                + dx[...,2]*dx[...,0] * neg_conic[:, 2, 0]
+                                + dx[...,2]*dx[...,1] * neg_conic[:, 2, 1]
+                            )) # Im P+ N- (N B P old)
 
-                    # get the distances used for calculating the gaussian impact
-                    dx = (tile_coord[:,None,:] - sel_neg_means2D[None,:]) # Im N- 2 (N P 2 old)
-                    dx = dx.unsqueeze(1).expand(-1, P, -1, -1) # Im P+ N- 2 (N B P 2 old)
-                    dy = sorted_depths[:, None] - sel_neg_depths[None, :] # P+ N-
-                    dy = dy.unsqueeze(dim=0).unsqueeze(dim=-1) # Im(1) P+ N- 1
-                    dy = dy.expand(dx.shape[0], -1, -1, -1) # Im P+ N- 1
-                    dx = torch.cat((dx, dy), dim=-1) # Im P+ N- 3 (N B P 3 old)
+                            # calculate the negative alpha of the gaussians
+                            neg_alpha = (neg_gauss_weight[..., None] * sel_neg_opacity[None]).clip(min=-0.99) # Im P+ N- 1 (N B P 1 old)
+                            neg_alpha = neg_alpha.sum(dim=2, keepdims=False) # Im P+ 1  (B P 1 old)
 
-                    # get the negative point spread
-                    neg_gauss_weight = torch.exp(-0.5 * (
-                        dx[...,0]**2 * neg_conic[:, 0, 0] 
-                        + dx[...,1]**2 * neg_conic[:, 1, 1]
-                        + dx[...,2]**2 * neg_conic[:, 2, 2]
-                        + dx[...,0]*dx[...,1] * neg_conic[:, 0, 1]
-                        + dx[...,0]*dx[...,2] * neg_conic[:, 0, 2]
-                        + dx[...,1]*dx[...,0] * neg_conic[:, 1, 0]
-                        + dx[...,1]*dx[...,2] * neg_conic[:, 1, 2]
-                        + dx[...,2]*dx[...,0] * neg_conic[:, 2, 0]
-                        + dx[...,2]*dx[...,1] * neg_conic[:, 2, 1]
-                    )) # Im P+ N- (N B P old)
+                            negative_impact_per_positive_gaussian += neg_alpha # Im P+ 1
 
-                    # calculate the negative alpha of the gaussians
-                    neg_alpha = (neg_gauss_weight[..., None] * sel_neg_opacity[None]).clip(min=-0.99) # Im P+ N- 1 (N B P 1 old)
-                    neg_alpha = neg_alpha.sum(dim=2, keepdims=False) # Im P+ 1  (B P 1 old)
-
-                    negative_impact_per_positive_gaussian += neg_alpha # Im P+ 1
-
-                    # apply the negative gaussian alpha to the positive gaussians
-                    alpha = alpha - negative_impact_per_positive_gaussian
-                    alpha = alpha.clip(min=0.01)
+                            # apply the negative gaussian alpha to the positive gaussians
+                            alpha = alpha - negative_impact_per_positive_gaussian
+                            alpha = alpha.clip(min=0.0)
                         
     
-        T = torch.cat([torch.ones_like(alpha[:,:1]), 1-alpha[:,:-1]], dim=1).cumprod(dim=1)
-        acc_alpha = (alpha * T).sum(dim=1)
-        tile_color = (T * alpha * sorted_color[None]).sum(dim=1) + (1-acc_alpha) * (1 if self.white_bkgd else 0)
-        tile_depth = ((T * alpha) * sorted_depths[None,:,None]).sum(dim=1)
-        self.render_color[h:h+TILE_SIZE, w:w+TILE_SIZE] = tile_color.reshape(TILE_SIZE, TILE_SIZE, -1)
-        self.render_depth[h:h+TILE_SIZE, w:w+TILE_SIZE] = tile_depth.reshape(TILE_SIZE, TILE_SIZE, -1)
-        self.render_alpha[h:h+TILE_SIZE, w:w+TILE_SIZE] = acc_alpha.reshape(TILE_SIZE, TILE_SIZE, -1)
+                T = torch.cat([torch.ones_like(alpha[:,:1]), 1-alpha[:,:-1]], dim=1).cumprod(dim=1)
+                acc_alpha = (alpha * T).sum(dim=1)
+                tile_color = (T * alpha * sorted_color[None]).sum(dim=1) + (1-acc_alpha) * (1 if self.white_bkgd else 0)
+                tile_depth = ((T * alpha) * sorted_depths[None,:,None]).sum(dim=1)
+                self.render_color[h:h+TILE_SIZE, w:w+TILE_SIZE] = tile_color.reshape(TILE_SIZE, TILE_SIZE, -1)
+                self.render_depth[h:h+TILE_SIZE, w:w+TILE_SIZE] = tile_depth.reshape(TILE_SIZE, TILE_SIZE, -1)
+                self.render_alpha[h:h+TILE_SIZE, w:w+TILE_SIZE] = acc_alpha.reshape(TILE_SIZE, TILE_SIZE, -1)
         
         # print(tile_stats)
         return {

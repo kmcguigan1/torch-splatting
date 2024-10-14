@@ -10,7 +10,10 @@ from gaussian_splatting.utils.camera_utils import to_viewpoint_camera
 from gaussian_splatting.utils.point_utils import get_point_clouds
 from gaussian_splatting.gauss_model import GaussModel
 from gaussian_splatting.gauss_render import GaussRenderer
-
+import torch.nn.functional as F
+import hydra
+from hydra.utils import get_original_cwd
+from omegaconf import DictConfig
 import contextlib
 
 from torch.profiler import profile, ProfilerActivity
@@ -76,6 +79,7 @@ class GSSTrainer(Trainer):
         self.gaussRender = GaussRenderer(**kwargs.get('render_kwargs', {}))
         self.lambda_dssim = 0.2
         self.lambda_depth = 0.0
+        
     
     def on_train_step(self):
         ind = np.random.choice(len(self.data['camera']))
@@ -99,8 +103,10 @@ class GSSTrainer(Trainer):
             print(prof.key_averages(group_by_stack_n=True).table(sort_by='self_cuda_time_total', row_limit=20))
 
 
+        # l1_loss = loss_utils.l1_loss(F.leaky_relu(out['render'], negative_slope=0.01), rgb)
         l1_loss = loss_utils.l1_loss(out['render'], rgb)
         depth_loss = loss_utils.l1_loss(out['depth'][..., 0][mask], depth[mask])
+        # ssim_loss = 1.0-loss_utils.ssim(F.relu(out['render']), rgb)
         ssim_loss = 1.0-loss_utils.ssim(out['render'], rgb)
 
         total_loss = (1-self.lambda_dssim) * l1_loss + self.lambda_dssim * ssim_loss + depth_loss * self.lambda_depth
@@ -185,60 +191,67 @@ class GSSTrainer(Trainer):
         image = np.concatenate([image, depth], axis=0)
         utils.imwrite(str(self.results_folder / f'image-{self.step}.png'), image)
 
-def manual_debug():
+# def manual_debug():
+#     device = 'cuda'
+#     folder = './B075X65R3X'
+#     data = read_all(folder, resize_factor=0.25)
+#     data = {k: v.to(device) for k, v in data.items()}
+#     data['depth_range'] = torch.Tensor([[1,3]]*len(data['rgb'])).to(device)
+
+#     gaussModel = GaussModel(debug=False)
+#     gaussModel.create_manually()
+
+#     render_kwargs = {
+#         'white_bkgd': True,
+#         'ignore_negatives': cfg.ignore_negatives
+#     }
+
+#     results_folder = 'result/test'
+#     os.makedirs(results_folder, exist_ok=True)
+#     trainer = GSSTrainer(model=gaussModel, 
+#         data=data,
+#         train_batch_size=1, 
+#         train_num_steps=1,
+#         i_image=1,
+#         train_lr=1e-3, 
+#         amp=False,
+#         fp16=True,
+#         results_folder=results_folder,
+#         render_kwargs=render_kwargs,
+#     )
+#     trainer.run_all_cameras()
+
+@hydra.main(config_path="config", config_name="config")
+def main(cfg: DictConfig):
+
     device = 'cuda'
-    folder = './B075X65R3X'
-    data = read_all(folder, resize_factor=0.25)
-    data = {k: v.to(device) for k, v in data.items()}
-    data['depth_range'] = torch.Tensor([[1,3]]*len(data['rgb'])).to(device)
 
-    gaussModel = GaussModel(debug=False)
-    gaussModel.create_manually()
+    # Get the original working directory
+    original_cwd = get_original_cwd()
+    print("Original Working Directory:", original_cwd)
+    print("Current Working Directory:", os.getcwd())
 
-    render_kwargs = {
-        'white_bkgd': True,
-    }
-
-    results_folder = 'result/test'
-    os.makedirs(results_folder, exist_ok=True)
-    trainer = GSSTrainer(model=gaussModel, 
-        data=data,
-        train_batch_size=1, 
-        train_num_steps=1,
-        i_image=1,
-        train_lr=1e-3, 
-        amp=False,
-        fp16=True,
-        results_folder=results_folder,
-        render_kwargs=render_kwargs,
-        ignore_negatives=False
-    )
-    trainer.run_all_cameras()
-
-def main():
-    device = 'cuda'
-    folder = './B075X65R3X'
+    folder = os.path.join(original_cwd, 'B075X65R3X')
     data = read_all(folder, resize_factor=0.25)
     data = {k: v.to(device) for k, v in data.items()}
     data['depth_range'] = torch.Tensor([[1,3]]*len(data['rgb'])).to(device)
 
     # Call the set_seed function with a fixed seed value
-    SEED = 42  # You can choose any integer value
-    set_seed(SEED)
+    set_seed(cfg.seed)
 
     # Set the current device
     torch.cuda.set_device(0)
 
-
     points = get_point_clouds(data['camera'], data['depth'], data['alpha'], data['rgb'])
-    raw_points = points.random_sample(2**14)
+    raw_points = points.random_sample(cfg.number_guassian)
     # raw_points.write_ply(open('points.ply', 'wb'))
 
-    gaussModel = GaussModel(debug=False)
+    gaussModel = GaussModel(debug=False,negative_gaussian=cfg.negative_gaussian)
     gaussModel.create_from_pcd(pcd=raw_points)
     
     render_kwargs = {
         'white_bkgd': True,
+        'negative_gaussian':cfg.negative_gaussian
     }
 
     results_folder = 'result/test'
@@ -246,7 +259,7 @@ def main():
     trainer = GSSTrainer(model=gaussModel, 
         data=data,
         train_batch_size=1, 
-        train_num_steps=1000,
+        train_num_steps=cfg.train_num_steps,
         i_image =100,
         train_lr=1e-3, 
         amp=False,
