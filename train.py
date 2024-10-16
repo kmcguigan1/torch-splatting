@@ -15,7 +15,8 @@ import hydra
 from hydra.utils import get_original_cwd
 from omegaconf import DictConfig
 import contextlib
-
+import wandb  # Import wandb
+from omegaconf import OmegaConf
 from torch.profiler import profile, ProfilerActivity
 
 USE_GPU_PYTORCH = True
@@ -66,10 +67,6 @@ def get_torch_gpu_memory_usage(device=0):
         'Approx Free Memory (MB)': free_memory
     }
 
-    # print(f"GPU {device} Memory Usage:")
-    # for key, value in memory_info.items():
-    #     print(f"  {key}: {value:.2f} MB")
-
     return memory_info
 
 class GSSTrainer(Trainer):
@@ -79,8 +76,14 @@ class GSSTrainer(Trainer):
         self.gaussRender = GaussRenderer(**kwargs.get('render_kwargs', {}))
         self.lambda_dssim = 0.2
         self.lambda_depth = 0.0
-        
-    
+
+        # Initialize wandb logging
+        self.use_wandb = kwargs.get('use_wandb', False)
+        if self.use_wandb:
+            self.wandb = wandb
+            # Log model parameters
+            self.wandb.watch(self.model, log='all')
+
     def on_train_step(self):
         ind = np.random.choice(len(self.data['camera']))
         camera = self.data['camera'][ind]
@@ -102,29 +105,38 @@ class GSSTrainer(Trainer):
         if USE_PROFILE:
             print(prof.key_averages(group_by_stack_n=True).table(sort_by='self_cuda_time_total', row_limit=20))
 
-
-        # l1_loss = loss_utils.l1_loss(F.leaky_relu(out['render'], negative_slope=0.01), rgb)
         l1_loss = loss_utils.l1_loss(out['render'], rgb)
         depth_loss = loss_utils.l1_loss(out['depth'][..., 0][mask], depth[mask])
-        # ssim_loss = 1.0-loss_utils.ssim(F.relu(out['render']), rgb)
-        ssim_loss = 1.0-loss_utils.ssim(out['render'], rgb)
+        ssim_loss = 1.0 - loss_utils.ssim(out['render'], rgb)
 
-        total_loss = (1-self.lambda_dssim) * l1_loss + self.lambda_dssim * ssim_loss + depth_loss * self.lambda_depth
+        total_loss = (1 - self.lambda_dssim) * l1_loss + self.lambda_dssim * ssim_loss + depth_loss * self.lambda_depth
         psnr = utils.img2psnr(out['render'], rgb)
 
         memory_info = get_torch_gpu_memory_usage()
 
-        percent_memory_usage = memory_info['Max Reserved Memory (MB)']/memory_info['Total Memory (MB)']*100
+        percent_memory_usage = memory_info['Max Reserved Memory (MB)'] / memory_info['Total Memory (MB)'] * 100
 
-        log_dict = {'total': total_loss,'l1':l1_loss, 'ssim': ssim_loss, 'depth': depth_loss, 'psnr': psnr, 
-                    'pos':out['tile_stats']['pos'], 'negs':out['tile_stats']['negs'], 'Memory Usage (%)':percent_memory_usage}
+        log_dict = {
+            'total_loss': total_loss.item(),
+            'l1_loss': l1_loss.item(),
+            'ssim_loss': ssim_loss.item(),
+            'depth_loss': depth_loss.item(),
+            'psnr': psnr.item(),
+            'pos': out['tile_stats']['pos'].item(),
+            'negs': out['tile_stats']['negs'].item(),
+            'Memory Usage (%)': percent_memory_usage
+        }
+
+        # Log metrics to wandb
+        if self.use_wandb:
+            self.wandb.log(log_dict)
 
         return total_loss, log_dict
-    
+
     def run_all_cameras(self):
         import matplotlib.pyplot as plt
         for ind in range(len(self.data['camera'])):
-            print("writting camera: ", ind)
+            print("Writing camera: ", ind)
             camera = self.data['camera'][ind]
 
             if USE_GPU_PYTORCH:
@@ -132,13 +144,24 @@ class GSSTrainer(Trainer):
 
             out = self.gaussRender(pc=self.model, camera=camera)
             rgb_pd = out['render'].detach().cpu().numpy()
-            utils.imwrite(str(self.results_folder / f'image-{ind}.png'), rgb_pd)
+            image_path = str(self.results_folder / f'image-{ind}.png')
+            utils.imwrite(image_path, rgb_pd)
+
+            # Log images to wandb
+            if self.use_wandb:
+                self.wandb.log({f'Image {ind}': self.wandb.Image(image_path)})
 
     def post_run_step(self, **kwargs):
         import matplotlib.pyplot as plt
         with torch.no_grad():
+            # Define the columns for the table
+            columns = ['Camera Index', 'total_loss', 'l1_loss', 'ssim_loss', 'depth_loss', 'psnr', 'pos', 'negs']
+            
+            if self.use_wandb:
+                # Initialize the table with the defined columns
+                table = self.wandb.Table(columns=columns)
+            
             for ind in range(len(self.data['camera'])):
-                # print("writting camera: ", ind)
                 camera = self.data['camera'][ind]
                 rgb = self.data['rgb'][ind]
                 depth = self.data['depth'][ind]
@@ -151,25 +174,54 @@ class GSSTrainer(Trainer):
 
                 l1_loss = loss_utils.l1_loss(out['render'], rgb)
                 depth_loss = loss_utils.l1_loss(out['depth'][..., 0][mask], depth[mask])
-                ssim_loss = 1.0-loss_utils.ssim(out['render'], rgb)
+                ssim_loss = 1.0 - loss_utils.ssim(out['render'], rgb)
 
-                total_loss = (1-self.lambda_dssim) * l1_loss + self.lambda_dssim * ssim_loss + depth_loss * self.lambda_depth
+                total_loss = (1 - self.lambda_dssim) * l1_loss + self.lambda_dssim * ssim_loss + depth_loss * self.lambda_depth
                 psnr = utils.img2psnr(out['render'], rgb)
 
-                log_dict = {'total': total_loss,'l1':l1_loss, 'ssim': ssim_loss, 'depth': depth_loss, 'psnr': psnr,
-                            'pos': out['tile_stats']['pos'], 'negs':out['tile_stats']['negs']}
-                print(f"Camera: {ind} -> {', '.join([f'{key}: {val:.4f}' for key, val in log_dict.items()])}")
+                log_dict = {
+                    'total_loss': total_loss.item(),
+                    'l1_loss': l1_loss.item(),
+                    'ssim_loss': ssim_loss.item(),
+                    'depth_loss': depth_loss.item(),
+                    'psnr': psnr.item(),
+                    'pos': out['tile_stats']['pos'].item(),
+                    'negs': out['tile_stats']['negs'].item()
+                }
+                print(f"Camera: {ind} -> {', '.join([f'{key}: {val:.4f}' if isinstance(val, float) else f'{key}: {val}' for key, val in log_dict.items()])}")
 
-                rgb = self.data['rgb'][ind].detach().cpu().numpy()
-                depth = self.data['depth'][ind].detach().cpu().numpy()
+                rgb = rgb.detach().cpu().numpy()
+                depth = depth.detach().cpu().numpy()
                 rgb_pd = out['render'].detach().cpu().numpy()
                 depth_pd = out['depth'].detach().cpu().numpy()[..., 0]
-                depth = np.concatenate([depth, depth_pd], axis=1)
-                depth = (1 - depth / depth.max())
-                depth = plt.get_cmap('jet')(depth)[..., :3]
+                depth_combined = np.concatenate([depth, depth_pd], axis=1)
+                depth_norm = (1 - depth_combined / depth_combined.max())
+                depth_colored = plt.get_cmap('jet')(depth_norm)[..., :3]
                 image = np.concatenate([rgb, rgb_pd], axis=1)
-                image = np.concatenate([image, depth], axis=0)
-                utils.imwrite(str(self.results_folder / f'image-{ind}-{self.step}.png'), image)
+                image = np.concatenate([image, depth_colored], axis=0)
+                image_path = str(self.results_folder / f'image-{ind}-{self.step}.png')
+                utils.imwrite(image_path, image)
+
+                # Log images and metrics to wandb
+                if self.use_wandb:
+                    # Log the image
+                    self.wandb.log({f'Post-run Image {ind}': self.wandb.Image(image_path)})
+
+                    # Prepare data for the table
+                    data = [ind]
+                    for key in columns[1:]:  # Skip 'Camera Index' as it's already added
+                        value = log_dict[key]
+                        if isinstance(value, (int, float)):
+                            data.append(value)
+                        else:
+                            data.append(str(value))  # Convert non-scalar values to string
+                    # Add data to the table
+                    table.add_data(*data)
+            
+            # Log the table to wandb
+            if self.use_wandb:
+                self.wandb.log({'Evaluation Metrics': table})
+
 
     def on_evaluate_step(self, **kwargs):
         import matplotlib.pyplot as plt
@@ -189,37 +241,12 @@ class GSSTrainer(Trainer):
         depth = plt.get_cmap('jet')(depth)[..., :3]
         image = np.concatenate([rgb, rgb_pd], axis=1)
         image = np.concatenate([image, depth], axis=0)
-        utils.imwrite(str(self.results_folder / f'image-{self.step}.png'), image)
+        image_path = str(self.results_folder / f'image-{self.step}.png')
+        utils.imwrite(image_path, image)
 
-# def manual_debug():
-#     device = 'cuda'
-#     folder = './B075X65R3X'
-#     data = read_all(folder, resize_factor=0.25)
-#     data = {k: v.to(device) for k, v in data.items()}
-#     data['depth_range'] = torch.Tensor([[1,3]]*len(data['rgb'])).to(device)
-
-#     gaussModel = GaussModel(debug=False)
-#     gaussModel.create_manually()
-
-#     render_kwargs = {
-#         'white_bkgd': True,
-#         'ignore_negatives': cfg.ignore_negatives
-#     }
-
-#     results_folder = 'result/test'
-#     os.makedirs(results_folder, exist_ok=True)
-#     trainer = GSSTrainer(model=gaussModel, 
-#         data=data,
-#         train_batch_size=1, 
-#         train_num_steps=1,
-#         i_image=1,
-#         train_lr=1e-3, 
-#         amp=False,
-#         fp16=True,
-#         results_folder=results_folder,
-#         render_kwargs=render_kwargs,
-#     )
-#     trainer.run_all_cameras()
+        # Log evaluation image to wandb
+        if self.use_wandb:
+            self.wandb.log({f'Evaluation Image {self.step}': self.wandb.Image(image_path)})
 
 @hydra.main(config_path="config", config_name="config")
 def main(cfg: DictConfig):
@@ -230,6 +257,11 @@ def main(cfg: DictConfig):
     original_cwd = get_original_cwd()
     print("Original Working Directory:", original_cwd)
     print("Current Working Directory:", os.getcwd())
+
+    # Convert cfg to a regular dictionary
+    config_dict = OmegaConf.to_container(cfg, resolve=True)
+    # Initialize wandb
+    wandb.init(project="Gaussian_splatting", config=config_dict, group='30000 training steps')  
 
     folder = os.path.join(original_cwd, 'B075X65R3X')
     data = read_all(folder, resize_factor=0.25)
@@ -246,32 +278,37 @@ def main(cfg: DictConfig):
     raw_points = points.random_sample(cfg.number_guassian)
     # raw_points.write_ply(open('points.ply', 'wb'))
 
-    gaussModel = GaussModel(debug=False,negative_gaussian=cfg.negative_gaussian)
+    gaussModel = GaussModel(debug=False, negative_gaussian=cfg.negative_gaussian)
     gaussModel.create_from_pcd(pcd=raw_points)
-    
+
     render_kwargs = {
         'white_bkgd': True,
-        'negative_gaussian':cfg.negative_gaussian
+        'negative_gaussian': cfg.negative_gaussian
     }
 
-    results_folder = 'result/test'
+    results_folder = os.path.join(original_cwd, 'result/test')
     os.makedirs(results_folder, exist_ok=True)
-    trainer = GSSTrainer(model=gaussModel, 
+
+    trainer = GSSTrainer(
+        model=gaussModel,
         data=data,
-        train_batch_size=1, 
+        train_batch_size=1,
         train_num_steps=cfg.train_num_steps,
-        i_image =100,
-        train_lr=1e-3, 
+        i_image=100,
+        train_lr=1e-3,
         amp=False,
         fp16=True,
         results_folder=results_folder,
         render_kwargs=render_kwargs,
+        use_wandb=True  # Enable wandb in the trainer
     )
 
     # trainer.on_evaluate_step()
     trainer.train()
     trainer.post_run_step()
 
+    # Finish wandb run
+    wandb.finish()
 
 if __name__ == "__main__":
     # manual_debug()
