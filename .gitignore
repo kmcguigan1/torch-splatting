@@ -4,3 +4,7 @@
 gsplat
 vis
 /B075X65R3X
+/analysis/artifacts
+/analysis/wandb
+/outputs/
+/multirun/
