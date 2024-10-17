@@ -153,6 +153,8 @@ class GSSTrainer(Trainer):
 
     def post_run_step(self, **kwargs):
         import matplotlib.pyplot as plt
+
+        self.gaussRender._render_positive_as_well = True
         with torch.no_grad():
             # Define the columns for the table
             columns = ['Camera Index', 'total_loss', 'l1_loss', 'ssim_loss', 'depth_loss', 'psnr', 'pos', 'negs']
@@ -160,6 +162,7 @@ class GSSTrainer(Trainer):
             if self.use_wandb:
                 # Initialize the table with the defined columns
                 table = self.wandb.Table(columns=columns)
+                table_pos_only = self.wandb.Table(columns=columns)
             
             for ind in range(len(self.data['camera'])):
                 camera = self.data['camera'][ind]
@@ -175,9 +178,14 @@ class GSSTrainer(Trainer):
                 l1_loss = loss_utils.l1_loss(out['render'], rgb)
                 depth_loss = loss_utils.l1_loss(out['depth'][..., 0][mask], depth[mask])
                 ssim_loss = 1.0 - loss_utils.ssim(out['render'], rgb)
-
                 total_loss = (1 - self.lambda_dssim) * l1_loss + self.lambda_dssim * ssim_loss + depth_loss * self.lambda_depth
                 psnr = utils.img2psnr(out['render'], rgb)
+
+                l1_loss_pos_only = loss_utils.l1_loss(out['render_pos_only'], rgb)
+                depth_loss_pos_only = loss_utils.l1_loss(out['depth_pos_only'][..., 0][mask], depth[mask])
+                ssim_loss_pos_only = 1.0 - loss_utils.ssim(out['render_pos_only'], rgb)
+                total_loss_pos_only = (1 - self.lambda_dssim) * l1_loss_pos_only + self.lambda_dssim * ssim_loss_pos_only +  self.lambda_depth * depth_loss_pos_only 
+                psnr_pos_only = utils.img2psnr(out['render_pos_only'], rgb)
 
                 log_dict = {
                     'total_loss': total_loss.item(),
@@ -188,7 +196,19 @@ class GSSTrainer(Trainer):
                     'pos': out['tile_stats']['pos'].item(),
                     'negs': out['tile_stats']['negs'].item()
                 }
+                
                 print(f"Camera: {ind} -> {', '.join([f'{key}: {val:.4f}' if isinstance(val, float) else f'{key}: {val}' for key, val in log_dict.items()])}")
+                log_dict_pos_only = {
+                    'total_loss': total_loss_pos_only.item(),
+                    'l1_loss': l1_loss_pos_only.item(),
+                    'ssim_loss': ssim_loss_pos_only.item(),
+                    'depth_loss': depth_loss_pos_only.item(),
+                    'psnr': psnr_pos_only.item(),
+                    'pos': out['tile_stats']['pos'].item(),
+                    'negs': out['tile_stats']['negs'].item()
+                }
+
+                print(f"Positive Only Camera: {ind} -> {', '.join([f'{key}: {val:.4f}' if isinstance(val, float) else f'{key}: {val}' for key, val in log_dict_pos_only.items()])}")
 
                 rgb = rgb.detach().cpu().numpy()
                 depth = depth.detach().cpu().numpy()
@@ -217,10 +237,23 @@ class GSSTrainer(Trainer):
                             data.append(str(value))  # Convert non-scalar values to string
                     # Add data to the table
                     table.add_data(*data)
-            
+
+                                        # Prepare data for the table
+                    data_pos_only = [ind]
+                    for key in columns[1:]:  # Skip 'Camera Index' as it's already added
+                        value = log_dict_pos_only[key]
+                        if isinstance(value, (int, float)):
+                            data_pos_only.append(value)
+                        else:
+                            data_pos_only.append(str(value))  # Convert non-scalar values to string
+                    # Add data to the table
+                    table_pos_only.add_data(*data_pos_only)
+
+
             # Log the table to wandb
             if self.use_wandb:
                 self.wandb.log({'Evaluation Metrics': table})
+                self.wandb.log({'Evaluation Metrics Pos Only': table_pos_only})
 
 
     def on_evaluate_step(self, **kwargs):
@@ -261,7 +294,7 @@ def main(cfg: DictConfig):
     # Convert cfg to a regular dictionary
     config_dict = OmegaConf.to_container(cfg, resolve=True)
     # Initialize wandb
-    wandb.init(project="Gaussian_splatting", config=config_dict, group='30000 training steps')  
+    wandb.init(project="Gaussian_splatting", config=config_dict, group='test')  
 
     folder = os.path.join(original_cwd, 'B075X65R3X')
     data = read_all(folder, resize_factor=0.25)

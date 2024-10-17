@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 import math
 from einops import reduce
+import copy 
+
 
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
@@ -189,22 +191,26 @@ class GaussRenderer(nn.Module):
     >>> out = gaussRender(pc=gaussModel, camera=camera)
     """
 
-    def __init__(self, active_sh_degree=3, white_bkgd=True, negative_gaussian=False, **kwargs):
+    def __init__(self, active_sh_degree=3, white_bkgd=True, negative_gaussian=False, render_positive_as_well= False, **kwargs):
         super(GaussRenderer, self).__init__()
         self.active_sh_degree = active_sh_degree
         self.debug = False
         self.white_bkgd = white_bkgd
         self.pix_coord = torch.stack(torch.meshgrid(torch.arange(128), torch.arange(128), indexing='xy'), dim=-1).to('cuda')
         self.negative_gaussian = negative_gaussian
+        self._render_positive_as_well = negative_gaussian and render_positive_as_well
     
-    # def build_color(self, means3D, shs, camera):
-    #     rays_o = camera.camera_center
-    #     rays_d = means3D - rays_o
-    #     color = eval_sh(self.active_sh_degree, shs.permute(0,2,1), rays_d)
-    #     color = (color + 0.5).clip(min=0.0)
-    #     return color
 
-    # TODO: remove the negs inputs
+        # Getter for 'render_positive_as_well'
+    @property
+    def render_positive_as_well(self):
+        return self._name
+
+    # Setter for 'render_positive_as_well'
+    @render_positive_as_well.setter
+    def name(self, render_positive_as_well):
+        self._render_positive_as_well = self.negative_gaussian and render_positive_as_well
+
     def render(self, camera, means2D, cov2d, cov3d, color, opacity, depths):
         # print("cov2d: ", cov2d)
         radii = get_radius(cov2d)
@@ -216,6 +222,11 @@ class GaussRenderer(nn.Module):
         self.render_color = torch.ones(*self.pix_coord.shape[:2], 3).to('cuda')
         self.render_depth = torch.zeros(*self.pix_coord.shape[:2], 1).to('cuda')
         self.render_alpha = torch.zeros(*self.pix_coord.shape[:2], 1).to('cuda')
+
+        if self._render_positive_as_well:
+            self.render_color_pos_only = torch.ones(*self.pix_coord.shape[:2], 3).to('cuda') 
+            self.render_depth_pos_only = torch.zeros(*self.pix_coord.shape[:2], 1).to('cuda')
+            self.render_alpha_pos_only = torch.zeros(*self.pix_coord.shape[:2], 1).to('cuda')
 
         TILE_SIZE = 32
         tile_stats = {'tile_negs':0, 'tiles':0, 'negs':0, 'pos':0}
@@ -264,8 +275,12 @@ class GaussRenderer(nn.Module):
                     + dx[:,:,0]*dx[:,:,1] * sorted_conic[:, 0, 1]
                     + dx[:,:,0]*dx[:,:,1] * sorted_conic[:, 1, 0]))
                 
-                alpha = (gauss_weight[..., None] * sorted_opacity[None]).clip(max=0.99) # Im P+ 1 (B P 1 old)
-  
+                # Two different alphas are needed if we want to render what it would look with only positive gaussians
+                if self._render_positive_as_well:
+                    alpha = (gauss_weight[..., None] * sorted_opacity[None]).clip(max=0.99) # Im P+ 1 (B P 1 old)
+                    alpha_pos_only = copy.deepcopy(alpha)
+                else:
+                    alpha = (gauss_weight[..., None] * sorted_opacity[None]).clip(max=0.99) # Im P+ 1 (B P 1 old)
                 # if and only if we have more than zero negative gaussians then we need to adjust
                 # the gaus weights based on the spatial positioning of these gaussians
 
@@ -331,6 +346,8 @@ class GaussRenderer(nn.Module):
                             # apply the negative gaussian alpha to the positive gaussians
                             alpha = alpha - negative_impact_per_positive_gaussian
                             alpha = alpha.clip(min=0.0)
+
+
                         
     
                 T = torch.cat([torch.ones_like(alpha[:,:1]), 1-alpha[:,:-1]], dim=1).cumprod(dim=1)
@@ -341,16 +358,37 @@ class GaussRenderer(nn.Module):
                 self.render_depth[h:h+TILE_SIZE, w:w+TILE_SIZE] = tile_depth.reshape(TILE_SIZE, TILE_SIZE, -1)
                 self.render_alpha[h:h+TILE_SIZE, w:w+TILE_SIZE] = acc_alpha.reshape(TILE_SIZE, TILE_SIZE, -1)
         
-        # print(tile_stats)
-        return {
-            "render": self.render_color,
-            "depth": self.render_depth,
-            "alpha": self.render_alpha,
-            "visiility_filter": radii > 0,
-            "radii": radii,
-            "tile_stats": tile_stats
-        }
+                if self._render_positive_as_well:
+                    T = torch.cat([torch.ones_like(alpha_pos_only[:,:1]), 1-alpha_pos_only[:,:-1]], dim=1).cumprod(dim=1)
+                    acc_alpha_pos_only = (alpha_pos_only * T).sum(dim=1)
+                    tile_color = (T * alpha_pos_only * sorted_color[None]).sum(dim=1) + (1-acc_alpha_pos_only) * (1 if self.white_bkgd else 0)
+                    tile_depth = ((T * alpha_pos_only) * sorted_depths[None,:,None]).sum(dim=1)
+                    self.render_color_pos_only[h:h+TILE_SIZE, w:w+TILE_SIZE] = tile_color.reshape(TILE_SIZE, TILE_SIZE, -1)
+                    self.render_depth_pos_only[h:h+TILE_SIZE, w:w+TILE_SIZE] = tile_depth.reshape(TILE_SIZE, TILE_SIZE, -1)
+                    self.render_alpha_pos_only[h:h+TILE_SIZE, w:w+TILE_SIZE] = acc_alpha_pos_only.reshape(TILE_SIZE, TILE_SIZE, -1)
 
+        # Pass as well the result without any negative gaussians. 
+        if self._render_positive_as_well:
+            return {
+                "render": self.render_color,
+                "depth": self.render_depth,
+                "alpha": self.render_alpha,
+                "visiility_filter": radii > 0,
+                "radii": radii,
+                "tile_stats": tile_stats,
+                "render_pos_only": self.render_color_pos_only,
+                "depth_pos_only": self.render_depth_pos_only,
+                "alpha_pos_only": self.render_alpha_pos_only,
+            }
+        else:
+         return {
+                "render": self.render_color,
+                "depth": self.render_depth,
+                "alpha": self.render_alpha,
+                "visiility_filter": radii > 0,
+                "radii": radii,
+                "tile_stats": tile_stats
+            }
     def forward(self, camera, pc, **kwargs):
         means3D = pc.get_xyz
         opacity = pc.get_opacity
