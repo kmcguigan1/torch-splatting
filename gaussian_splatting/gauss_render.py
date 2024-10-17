@@ -75,39 +75,39 @@ def build_covariance_3d(s, r):
     # symm = strip_symmetric(actual_covariance)
     # return symm
 
-def build_covariance_2d(
-    mean3d, cov3d, viewmatrix, fov_x, fov_y, focal_x, focal_y
-):
-    # The following models the steps outlined by equations 29
-	# and 31 in "EWA Splatting" (Zwicker et al., 2002). 
-	# Additionally considers aspect / scaling of viewport.
-	# Transposes used to account for row-/column-major conventions.
-    tan_fovx = math.tan(fov_x * 0.5)
-    tan_fovy = math.tan(fov_y * 0.5)
-    t = (mean3d @ viewmatrix[:3,:3]) + viewmatrix[-1:,:3]
+# def build_covariance_2d(
+#     mean3d, cov3d, viewmatrix, fov_x, fov_y, focal_x, focal_y
+# ):
+#     # The following models the steps outlined by equations 29
+# 	# and 31 in "EWA Splatting" (Zwicker et al., 2002). 
+# 	# Additionally considers aspect / scaling of viewport.
+# 	# Transposes used to account for row-/column-major conventions.
+#     tan_fovx = math.tan(fov_x * 0.5)
+#     tan_fovy = math.tan(fov_y * 0.5)
+#     t = (mean3d @ viewmatrix[:3,:3]) + viewmatrix[-1:,:3]
 
-    # truncate the influences of gaussians far outside the frustum.
-    tx = (t[..., 0] / t[..., 2]).clip(min=-tan_fovx*1.3, max=tan_fovx*1.3) * t[..., 2]
-    ty = (t[..., 1] / t[..., 2]).clip(min=-tan_fovy*1.3, max=tan_fovy*1.3) * t[..., 2]
-    tz = t[..., 2]
+#     # truncate the influences of gaussians far outside the frustum.
+#     tx = (t[..., 0] / t[..., 2]).clip(min=-tan_fovx*1.3, max=tan_fovx*1.3) * t[..., 2]
+#     ty = (t[..., 1] / t[..., 2]).clip(min=-tan_fovy*1.3, max=tan_fovy*1.3) * t[..., 2]
+#     tz = t[..., 2]
 
-    # Eq.29 locally affine transform 
-    # perspective transform is not affine so we approximate with first-order taylor expansion
-    # notice that we multiply by the intrinsic so that the variance is at the sceen space
-    J = torch.zeros(mean3d.shape[0], 3, 3).to(mean3d)
-    J[..., 0, 0] = 1 / tz * focal_x
-    J[..., 0, 2] = -tx / (tz * tz) * focal_x
-    J[..., 1, 1] = 1 / tz * focal_y
-    J[..., 1, 2] = -ty / (tz * tz) * focal_y
-    # J[..., 2, 0] = tx / t.norm(dim=-1) # discard
-    # J[..., 2, 1] = ty / t.norm(dim=-1) # discard
-    # J[..., 2, 2] = tz / t.norm(dim=-1) # discard
-    W = viewmatrix[:3,:3].T # transpose to correct viewmatrix
-    cov2d = J @ W @ cov3d @ W.T @ J.permute(0,2,1)
+#     # Eq.29 locally affine transform 
+#     # perspective transform is not affine so we approximate with first-order taylor expansion
+#     # notice that we multiply by the intrinsic so that the variance is at the sceen space
+#     J = torch.zeros(mean3d.shape[0], 3, 3).to(mean3d)
+#     J[..., 0, 0] = 1 / tz * focal_x
+#     J[..., 0, 2] = -tx / (tz * tz) * focal_x
+#     J[..., 1, 1] = 1 / tz * focal_y
+#     J[..., 1, 2] = -ty / (tz * tz) * focal_y
+#     # J[..., 2, 0] = tx / t.norm(dim=-1) # discard
+#     # J[..., 2, 1] = ty / t.norm(dim=-1) # discard
+#     # J[..., 2, 2] = tz / t.norm(dim=-1) # discard
+#     W = viewmatrix[:3,:3].T # transpose to correct viewmatrix
+#     cov2d = J @ W @ cov3d @ W.T @ J.permute(0,2,1)
     
-    # add low pass filter here according to E.q. 32
-    filter = torch.eye(2,2).to(cov2d) * 0.3
-    return cov2d[:, :2, :2] + filter[None]
+#     # add low pass filter here according to E.q. 32
+#     filter = torch.eye(2,2).to(cov2d) * 0.3
+#     return cov2d[:, :2, :2] + filter[None]
 
 def build_covariance_3d_projected(
     mean3d, cov3d, viewmatrix, fov_x, fov_y, focal_x, focal_y
@@ -140,9 +140,9 @@ def build_covariance_3d_projected(
     J[..., 0, 2] = -tx / (tz * tz) * focal_x
     J[..., 1, 1] = 1 / tz * focal_y
     J[..., 1, 2] = -ty / (tz * tz) * focal_y
-    # J[..., 2, 0] = tx / t.norm(dim=-1) # discard
-    # J[..., 2, 1] = ty / t.norm(dim=-1) # discard
-    # J[..., 2, 2] = tz / t.norm(dim=-1) # discard
+    J[..., 2, 0] = tx / t.norm(dim=-1) # discard
+    J[..., 2, 1] = ty / t.norm(dim=-1) # discard
+    J[..., 2, 2] = tz / t.norm(dim=-1) # discard
     cov3d_proj = J @ W @ cov3d @ W.T @ J.permute(0,2,1)
     
     # add low pass filter here according to E.q. 32
@@ -211,7 +211,11 @@ class GaussRenderer(nn.Module):
     def name(self, render_positive_as_well):
         self._render_positive_as_well = self.negative_gaussian and render_positive_as_well
 
-    def render(self, camera, means2D, cov2d, cov3d, color, opacity, depths):
+    def render(self, camera, means2D, cov3d_project, color, opacity, depths):
+
+        # some equations only need the 2d version of the covariance. 
+        cov2d = cov3d_project[:, :2, :2]
+
         # print("cov2d: ", cov2d)
         radii = get_radius(cov2d)
         # print("radii: ", radii)
@@ -311,7 +315,7 @@ class GaussRenderer(nn.Module):
 
                             # select the negative gaussians in the tile
                             sel_neg_means2D = means2D[neg_in_mask_in_depth]
-                            sel_neg_cov3d = cov3d[neg_in_mask_in_depth]
+                            sel_neg_cov3d = cov3d_project[neg_in_mask_in_depth]
                             sel_neg_depths = depths[neg_in_mask_in_depth]
                             sel_neg_opacity = opacity[neg_in_mask_in_depth]
                             neg_conic = sel_neg_cov3d.inverse() # inverse of variance
@@ -428,7 +432,7 @@ class GaussRenderer(nn.Module):
             # print("cov3d: ", cov3d)
                 
         with prof("build cov2d"):
-            cov2d = build_covariance_2d(
+            cov3d_project = build_covariance_3d_projected(
                 mean3d=means3D, 
                 cov3d=cov3d, 
                 viewmatrix=camera.world_view_transform,
@@ -449,8 +453,7 @@ class GaussRenderer(nn.Module):
             rets = self.render(
                 camera = camera, 
                 means2D=means2D,
-                cov2d=cov2d,
-                cov3d=cov3d,
+                cov3d_project=cov3d_project,
                 color=color,
                 opacity=opacity, 
                 depths=depths,
