@@ -1,5 +1,7 @@
 # config/config.yaml
 seed: 42
 number_guassian: 16384
-train_num_steps: 1000
-negative_gaussian: True
+train_num_steps: 4000
+negative_gaussian: False
+debug_pos_only: False
+debug_neg_only: False

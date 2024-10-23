@@ -63,11 +63,11 @@ class GaussModel(nn.Module):
         """
             create the guassian model from a manual setup
         """
-        xyz = torch.tensor([[0.,0.,0.],[0.6,0.6,0.6]])
-        scaling = torch.log(torch.tensor([[2.0,2.0,2.0],[1.2,1.2,1.2]]))
-        rotation = torch.tensor([[0.1,0.1,0.1, 0.1],[0.1,0.1,0.1, 0.1]])
-        colors = torch.tensor([[0.9,0.,0.],[0.0,0.0,0.9]])
-        opacity = torch.tensor([[0.9,],[0.9,]])
+        xyz = torch.tensor([[0.,0.,0.],[0,0.5,0],[0,-0.5,0]])
+        scaling = torch.log(torch.tensor([[2.0,2.0,2.0],[1.2,1.2,1.2],[1.2,1.2,2]]))
+        rotation = torch.tensor([[0.1,0.1,0.1, 0.1],[0.1,0.1,0.1, 0.1],[0.1,0.1,0.1, 0.1]])
+        colors = torch.tensor([[0.9,0.,0.],[0.0,0.0,0.9],[0.0,0.0,0.9]])
+        opacity = torch.tensor([[0.9,],[-0.9,],[-0.9,]])
 
         scaling = self.scaling_inverse_activation(scaling)
         colors = self.inverse_color_activation(colors)
@@ -81,21 +81,21 @@ class GaussModel(nn.Module):
         self._opacity = nn.Parameter(opacity.requires_grad_(True))
         self.max_radii2D = torch.zeros((self._xyz.shape[0]), device="cuda")
 
-        neg_xyz = torch.tensor([[0.0,0.0,0.0],])
-        neg_scaling = torch.log(torch.tensor([[1.5,1.0,1.0],]))
-        neg_rotation = torch.tensor([[0.1,0.1,0.1, 0.1],])
-        neg_colors = torch.tensor([[0.9,0.,0.],])
-        neg_opacity = torch.tensor([[0.9,],])
+        # neg_xyz = torch.tensor([[0.0,0.0,0.0],])
+        # neg_scaling = torch.log(torch.tensor([[1.5,1.0,1.0],]))
+        # neg_rotation = torch.tensor([[0.1,0.1,0.1, 0.1],])
+        # neg_colors = torch.tensor([[0.9,0.,0.],])
+        # neg_opacity = torch.tensor([[0.9,],])
 
-        neg_scaling = self.scaling_inverse_activation(neg_scaling)
-        neg_colors = self.inverse_color_activation(neg_colors)
-        neg_opacity = self.inverse_opacity_activation(neg_opacity)
+        # neg_scaling = self.scaling_inverse_activation(neg_scaling)
+        # neg_colors = self.inverse_color_activation(neg_colors)
+        # neg_opacity = self.inverse_opacity_activation(neg_opacity)
         
-        # create the positive gaussian xyz, scaling, rotation, color, opacity
-        self._neg_xyz = nn.Parameter(neg_xyz.requires_grad_(True))
-        self._neg_scaling = nn.Parameter(neg_scaling.requires_grad_(True))
-        self._neg_rotation = nn.Parameter(neg_rotation.requires_grad_(True))
-        self._neg_opacity = nn.Parameter(neg_opacity.requires_grad_(True))
+        # # create the positive gaussian xyz, scaling, rotation, color, opacity
+        # self._neg_xyz = nn.Parameter(neg_xyz.requires_grad_(True))
+        # self._neg_scaling = nn.Parameter(neg_scaling.requires_grad_(True))
+        # self._neg_rotation = nn.Parameter(neg_rotation.requires_grad_(True))
+        # self._neg_opacity = nn.Parameter(neg_opacity.requires_grad_(True))
 
         return self
 

@@ -151,10 +151,12 @@ class GSSTrainer(Trainer):
             if self.use_wandb:
                 self.wandb.log({f'Image {ind}': self.wandb.Image(image_path)})
 
-    def post_run_step(self, **kwargs):
+    def post_run_step(self, debug_pos_only=False, debug_neg_only=False):
         import matplotlib.pyplot as plt
 
-        self.gaussRender._render_positive_as_well = True
+        self.gaussRender._render_positive_as_well = debug_pos_only
+        self.gaussRender._render_negatives_only = debug_neg_only
+
         with torch.no_grad():
             # Define the columns for the table
             columns = ['Camera Index', 'total_loss', 'l1_loss', 'ssim_loss', 'depth_loss', 'psnr', 'pos', 'negs']
@@ -162,7 +164,9 @@ class GSSTrainer(Trainer):
             if self.use_wandb:
                 # Initialize the table with the defined columns
                 table = self.wandb.Table(columns=columns)
-                table_pos_only = self.wandb.Table(columns=columns)
+
+                if debug_pos_only:
+                    table_pos_only = self.wandb.Table(columns=columns)
             
             for ind in range(len(self.data['camera'])):
                 camera = self.data['camera'][ind]
@@ -181,11 +185,7 @@ class GSSTrainer(Trainer):
                 total_loss = (1 - self.lambda_dssim) * l1_loss + self.lambda_dssim * ssim_loss + depth_loss * self.lambda_depth
                 psnr = utils.img2psnr(out['render'], rgb)
 
-                l1_loss_pos_only = loss_utils.l1_loss(out['render_pos_only'], rgb)
-                depth_loss_pos_only = loss_utils.l1_loss(out['depth_pos_only'][..., 0][mask], depth[mask])
-                ssim_loss_pos_only = 1.0 - loss_utils.ssim(out['render_pos_only'], rgb)
-                total_loss_pos_only = (1 - self.lambda_dssim) * l1_loss_pos_only + self.lambda_dssim * ssim_loss_pos_only +  self.lambda_depth * depth_loss_pos_only 
-                psnr_pos_only = utils.img2psnr(out['render_pos_only'], rgb)
+
 
                 log_dict = {
                     'total_loss': total_loss.item(),
@@ -196,28 +196,59 @@ class GSSTrainer(Trainer):
                     'pos': out['tile_stats']['pos'].item(),
                     'negs': out['tile_stats']['negs'].item()
                 }
-                
                 print(f"Camera: {ind} -> {', '.join([f'{key}: {val:.4f}' if isinstance(val, float) else f'{key}: {val}' for key, val in log_dict.items()])}")
-                log_dict_pos_only = {
-                    'total_loss': total_loss_pos_only.item(),
-                    'l1_loss': l1_loss_pos_only.item(),
-                    'ssim_loss': ssim_loss_pos_only.item(),
-                    'depth_loss': depth_loss_pos_only.item(),
-                    'psnr': psnr_pos_only.item(),
-                    'pos': out['tile_stats']['pos'].item(),
-                    'negs': out['tile_stats']['negs'].item()
-                }
+                
+                if debug_pos_only:
+                    l1_loss_pos_only = loss_utils.l1_loss(out['render_pos_only'], rgb)
+                    depth_loss_pos_only = loss_utils.l1_loss(out['depth_pos_only'][..., 0][mask], depth[mask])
+                    ssim_loss_pos_only = 1.0 - loss_utils.ssim(out['render_pos_only'], rgb)
+                    total_loss_pos_only = (1 - self.lambda_dssim) * l1_loss_pos_only + self.lambda_dssim * ssim_loss_pos_only +  self.lambda_depth * depth_loss_pos_only 
+                    psnr_pos_only = utils.img2psnr(out['render_pos_only'], rgb)
+                    
+                    log_dict_pos_only = {
+                        'total_loss': total_loss_pos_only.item(),
+                        'l1_loss': l1_loss_pos_only.item(),
+                        'ssim_loss': ssim_loss_pos_only.item(),
+                        'depth_loss': depth_loss_pos_only.item(),
+                        'psnr': psnr_pos_only.item(),
+                        'pos': out['tile_stats']['pos'].item(),
+                        'negs': out['tile_stats']['negs'].item()
+                    }
 
-                print(f"Positive Only Camera: {ind} -> {', '.join([f'{key}: {val:.4f}' if isinstance(val, float) else f'{key}: {val}' for key, val in log_dict_pos_only.items()])}")
+                    print(f"Positive Only Camera: {ind} -> {', '.join([f'{key}: {val:.4f}' if isinstance(val, float) else f'{key}: {val}' for key, val in log_dict_pos_only.items()])}")
 
                 rgb = rgb.detach().cpu().numpy()
                 depth = depth.detach().cpu().numpy()
                 rgb_pd = out['render'].detach().cpu().numpy()
                 depth_pd = out['depth'].detach().cpu().numpy()[..., 0]
-                depth_combined = np.concatenate([depth, depth_pd], axis=1)
+
+                rgb_list = [rgb, rgb_pd]
+                depth_list = [depth, depth_pd]
+
+                if debug_pos_only:
+                    rgb_pd_pos = out['render_pos_only'].detach().cpu().numpy()
+                    depth_pd_pos = out['depth_pos_only'].detach().cpu().numpy()[..., 0]
+                    rgb_diff = rgb_pd - rgb_pd_pos
+                    max_diff, min_diff = rgb_diff.max(),rgb_diff.min()
+                    rgb_diff = (rgb_diff-min_diff)/(max_diff-min_diff)
+                    depth_diff = depth_pd - depth_pd_pos
+
+                    rgb_list = rgb_list + [rgb_pd_pos, rgb_diff]
+                    depth_list = depth_list + [depth_pd_pos, depth_diff]
+
+                if debug_neg_only:
+                    rgb_pd_neg = out['render_neg_only'].detach().cpu().numpy()
+                    depth_pd_neg = out['depth_neg_only'].detach().cpu().numpy()[..., 0]
+
+                    rgb_list = rgb_list + [rgb_pd_neg]
+                    depth_list = depth_list + [depth_pd_neg]
+
+
+
+                depth_combined = np.concatenate(depth_list, axis=1)
                 depth_norm = (1 - depth_combined / depth_combined.max())
                 depth_colored = plt.get_cmap('jet')(depth_norm)[..., :3]
-                image = np.concatenate([rgb, rgb_pd], axis=1)
+                image = np.concatenate(rgb_list, axis=1)
                 image = np.concatenate([image, depth_colored], axis=0)
                 image_path = str(self.results_folder / f'image-{ind}-{self.step}.png')
                 utils.imwrite(image_path, image)
@@ -238,22 +269,25 @@ class GSSTrainer(Trainer):
                     # Add data to the table
                     table.add_data(*data)
 
-                                        # Prepare data for the table
-                    data_pos_only = [ind]
-                    for key in columns[1:]:  # Skip 'Camera Index' as it's already added
-                        value = log_dict_pos_only[key]
-                        if isinstance(value, (int, float)):
-                            data_pos_only.append(value)
-                        else:
-                            data_pos_only.append(str(value))  # Convert non-scalar values to string
-                    # Add data to the table
-                    table_pos_only.add_data(*data_pos_only)
+                    if debug_pos_only:
+                        # Prepare data for the table
+                        data_pos_only = [ind]
+                        for key in columns[1:]:  # Skip 'Camera Index' as it's already added
+                            value = log_dict_pos_only[key]
+                            if isinstance(value, (int, float)):
+                                data_pos_only.append(value)
+                            else:
+                                data_pos_only.append(str(value))  # Convert non-scalar values to string
+                        # Add data to the table
+                        table_pos_only.add_data(*data_pos_only)
 
 
             # Log the table to wandb
             if self.use_wandb:
                 self.wandb.log({'Evaluation Metrics': table})
-                self.wandb.log({'Evaluation Metrics Pos Only': table_pos_only})
+
+                if debug_pos_only:
+                    self.wandb.log({'Evaluation Metrics Pos Only': table_pos_only})
 
 
     def on_evaluate_step(self, **kwargs):
@@ -294,7 +328,11 @@ def main(cfg: DictConfig):
     # Convert cfg to a regular dictionary
     config_dict = OmegaConf.to_container(cfg, resolve=True)
     # Initialize wandb
-    wandb.init(project="Gaussian_splatting", config=config_dict, group='test')  
+    wandb.init(project="Gaussian_splatting", 
+               config=config_dict, 
+               group='4000-positive-run',
+               id=wandb.util.generate_id(),
+               reinit=True)  
 
     folder = os.path.join(original_cwd, 'B075X65R3X')
     data = read_all(folder, resize_factor=0.25)
@@ -319,7 +357,7 @@ def main(cfg: DictConfig):
         'negative_gaussian': cfg.negative_gaussian
     }
 
-    results_folder = os.path.join(original_cwd, 'result/test')
+    results_folder = os.path.join(os.getcwd(), 'result/test')
     os.makedirs(results_folder, exist_ok=True)
 
     trainer = GSSTrainer(
@@ -338,10 +376,51 @@ def main(cfg: DictConfig):
 
     # trainer.on_evaluate_step()
     trainer.train()
-    trainer.post_run_step()
+    trainer.post_run_step(debug_pos_only=cfg.debug_pos_only, debug_neg_only=cfg.debug_neg_only)
 
     # Finish wandb run
     wandb.finish()
+
+@hydra.main(config_path="config", config_name="config")
+def manual_debug(cfg: DictConfig):
+    device = 'cuda'
+
+    # Get the original working directory
+    original_cwd = get_original_cwd()
+    print("Original Working Directory:", original_cwd)
+    print("Current Working Directory:", os.getcwd())
+
+    config_dict = OmegaConf.to_container(cfg, resolve=True)
+
+    folder = os.path.join(original_cwd, 'B075X65R3X')
+    data = read_all(folder, resize_factor=0.25)
+    data = {k: v.to(device) for k, v in data.items()}
+    data['depth_range'] = torch.Tensor([[1,3]]*len(data['rgb'])).to(device)
+
+    gaussModel = GaussModel(debug=False, negative_gaussian=cfg.negative_gaussian)
+    gaussModel.create_manually()
+
+    render_kwargs = {
+        'white_bkgd': True,
+        'negative_gaussian': cfg.negative_gaussian
+    }
+
+    results_folder = 'result/test'
+    os.makedirs(results_folder, exist_ok=True)
+    trainer = GSSTrainer(model=gaussModel, 
+        data=data,
+        train_batch_size=1, 
+        train_num_steps=1,
+        i_image=1,
+        train_lr=1e-3, 
+        amp=False,
+        fp16=True,
+        results_folder=results_folder,
+        render_kwargs=render_kwargs,
+        use_wandb=False
+    )
+    trainer.run_all_cameras()
+
 
 if __name__ == "__main__":
     # manual_debug()
