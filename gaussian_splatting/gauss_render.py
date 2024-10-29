@@ -369,7 +369,7 @@ class GaussRenderer(nn.Module):
                         alpha = alpha.clip(min=0.0)
 
 
-                output = {}
+      
     
                 T = torch.cat([torch.ones_like(alpha[:,:1]), 1-alpha[:,:-1]], dim=1).cumprod(dim=1)
                 acc_alpha = (alpha * T).sum(dim=1)
@@ -378,13 +378,6 @@ class GaussRenderer(nn.Module):
                 self.render_color[h:h+TILE_SIZE, w:w+TILE_SIZE] = tile_color.reshape(TILE_SIZE, TILE_SIZE, -1)
                 self.render_depth[h:h+TILE_SIZE, w:w+TILE_SIZE] = tile_depth.reshape(TILE_SIZE, TILE_SIZE, -1)
                 self.render_alpha[h:h+TILE_SIZE, w:w+TILE_SIZE] = acc_alpha.reshape(TILE_SIZE, TILE_SIZE, -1)
-        
-                output["render"] = self.render_color
-                output["depth"] = self.render_depth
-                output["alpha"] = self.render_alpha
-                output["visiility_filter"] = radii > 0
-                output["radii"] = radii
-                output["tile_stats"] = tile_stats
 
 
                 if self._render_positive_as_well:
@@ -396,9 +389,7 @@ class GaussRenderer(nn.Module):
                     self.render_depth_pos_only[h:h+TILE_SIZE, w:w+TILE_SIZE] = tile_depth.reshape(TILE_SIZE, TILE_SIZE, -1)
                     self.render_alpha_pos_only[h:h+TILE_SIZE, w:w+TILE_SIZE] = acc_alpha_pos_only.reshape(TILE_SIZE, TILE_SIZE, -1)
 
-                    output["render_pos_only"] = self.render_color_pos_only
-                    output["depth_pos_only"] = self.render_depth_pos_only
-                    output["alpha_pos_only"] = self.render_alpha_pos_only
+
                 
                 if self._render_negatives_only:
 
@@ -436,10 +427,25 @@ class GaussRenderer(nn.Module):
                         self.render_color_neg_only[h:h+TILE_SIZE, w:w+TILE_SIZE] = tile_color.reshape(TILE_SIZE, TILE_SIZE, -1)
                         self.render_depth_neg_only[h:h+TILE_SIZE, w:w+TILE_SIZE] = tile_depth.reshape(TILE_SIZE, TILE_SIZE, -1)
                         self.render_alpha_neg_only[h:h+TILE_SIZE, w:w+TILE_SIZE] = acc_alpha.reshape(TILE_SIZE, TILE_SIZE, -1)
+        
+        output = {}
+        output["render"] = self.render_color
+        output["depth"] = self.render_depth
+        output["alpha"] = self.render_alpha
+        output["visiility_filter"] = radii > 0
+        output["radii"] = radii
+        output["tile_stats"] = tile_stats
 
-                    output["render_neg_only"] = self.render_color_neg_only
-                    output["depth_neg_only"] = self.render_depth_neg_only
-                    output["alpha_neg_only"] = self.render_alpha_neg_only
+
+        if self._render_positive_as_well:
+                output["render_pos_only"] = self.render_color_pos_only
+                output["depth_pos_only"] = self.render_depth_pos_only
+                output["alpha_pos_only"] = self.render_alpha_pos_only
+
+        if self._render_negatives_only:
+            output["render_neg_only"] = self.render_color_neg_only
+            output["depth_neg_only"] = self.render_depth_neg_only
+            output["alpha_neg_only"] = self.render_alpha_neg_only
 
         return output
     
