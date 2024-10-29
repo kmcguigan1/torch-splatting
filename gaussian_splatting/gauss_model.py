@@ -6,6 +6,7 @@ from gaussian_splatting.utils.distcuda2 import distCUDA2
 from gaussian_splatting.utils.point_utils import PointCloud
 from gaussian_splatting.gauss_render import strip_symmetric, inverse_sigmoid, build_scaling_rotation
 from gaussian_splatting.utils.sh_utils import RGB2SH
+import itertools
 
 class GaussModel(nn.Module):
     """
@@ -63,11 +64,32 @@ class GaussModel(nn.Module):
         """
             create the guassian model from a manual setup
         """
-        xyz = torch.tensor([[0.,0.,0.],[0,0.5,0],[0,-0.5,0]])
-        scaling = torch.log(torch.tensor([[2.0,2.0,2.0],[1.2,1.2,1.2],[1.2,1.2,2]]))
-        rotation = torch.tensor([[0.1,0.1,0.1, 0.1],[0.1,0.1,0.1, 0.1],[0.1,0.1,0.1, 0.1]])
-        colors = torch.tensor([[0.9,0.,0.],[0.0,0.0,0.9],[0.0,0.0,0.9]])
-        opacity = torch.tensor([[0.9,],[-0.9,],[-0.9,]])
+        # Test 1
+        # xyz = torch.tensor([[0.,0.,0.],[0.,0.,-3.0],[0.,0.,-1.0]])
+        # scaling = torch.tensor([[2.0,2.0,2.0],[1.2,1.2,1.2],[1.,1.,1.]])
+        # rotation = torch.tensor([[1.,0.,0., 0.],[1.,0.,0., 0.],[1.,0.,0., 0.]])
+        # colors = torch.tensor([[0.9,0.,0.],[0.0,0.0,0.9],[0.0,0.0,0.9]])
+        # opacity = torch.tensor([[0.9,],[0.9,],[-0.9]])
+
+        # Test 2
+        # Generate positions for the 3x3x3 cube of positive Gaussians
+        xyz = torch.tensor(list(itertools.product([-1.0, 0.0, 1.0], repeat=3)))
+
+        # Add the negative Gaussian at the center
+        xyz = torch.cat([xyz, torch.tensor([[0.0, 0.0, 0.0]])], dim=0)  # Now shape (28, 3)
+
+        # Scaling factors (circular Gaussians)
+        scaling = torch.ones((28, 3))*0.5  # All ones, circular Gaussians
+        scaling[27]=1.2
+
+        # Rotation matrices (identity rotations)
+        rotation = torch.tensor([[1.0, 0.0, 0.0, 0.0]] * 28)  # Identity rotations for all Gaussians
+
+        # Colors: blue for positive Gaussians, arbitrary for negative Gaussian
+        colors = torch.tensor([[0.0, 0.0, 0.9]] * 9 + [[0.0, 0.9, 0.0]] * 9 + [[0.9, 0.0, 0.0]] * 9 + [[0.5, 0.5, 0.5]])  # Shape (28, 3)
+
+        # Opacity values: positive for cube Gaussians, negative for center Gaussian
+        opacity = torch.tensor([[0.8]] * 27 + [[-1.0]])  # Shape (28, 1)
 
         scaling = self.scaling_inverse_activation(scaling)
         colors = self.inverse_color_activation(colors)
@@ -80,6 +102,10 @@ class GaussModel(nn.Module):
         self._rotation = nn.Parameter(rotation.requires_grad_(True))
         self._opacity = nn.Parameter(opacity.requires_grad_(True))
         self.max_radii2D = torch.zeros((self._xyz.shape[0]), device="cuda")
+
+
+
+        
 
         # neg_xyz = torch.tensor([[0.0,0.0,0.0],])
         # neg_scaling = torch.log(torch.tensor([[1.5,1.0,1.0],]))

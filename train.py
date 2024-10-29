@@ -151,11 +151,12 @@ class GSSTrainer(Trainer):
             if self.use_wandb:
                 self.wandb.log({f'Image {ind}': self.wandb.Image(image_path)})
 
-    def post_run_step(self, debug_pos_only=False, debug_neg_only=False):
+    def post_run_step(self, debug_pos_only=False, debug_neg_only=False, debug_neg_max=False):
         import matplotlib.pyplot as plt
 
         self.gaussRender._render_positive_as_well = debug_pos_only
         self.gaussRender._render_negatives_only = debug_neg_only
+        self.gaussRender._render_with_negative_max_opacity = debug_neg_max
 
         with torch.no_grad():
             # Define the columns for the table
@@ -243,6 +244,12 @@ class GSSTrainer(Trainer):
                     rgb_list = rgb_list + [rgb_pd_neg]
                     depth_list = depth_list + [depth_pd_neg]
 
+                if debug_neg_max:
+                    rgb_pd_neg_max = out['render_neg_max'].detach().cpu().numpy()
+                    depth_pd_neg_max = out['depth_neg_max'].detach().cpu().numpy()[..., 0]
+
+                    rgb_list = rgb_list + [rgb_pd_neg_max]
+                    depth_list = depth_list + [depth_pd_neg_max]
 
 
                 depth_combined = np.concatenate(depth_list, axis=1)
@@ -315,6 +322,15 @@ class GSSTrainer(Trainer):
         if self.use_wandb:
             self.wandb.log({f'Evaluation Image {self.step}': self.wandb.Image(image_path)})
 
+    def save_model(self,**kwargs):
+
+        torch.save(self.model.state_dict(), 'model_state_dict.pth')
+
+
+
+
+
+
 @hydra.main(config_path="config", config_name="config")
 def main(cfg: DictConfig):
 
@@ -330,7 +346,7 @@ def main(cfg: DictConfig):
     # Initialize wandb
     wandb.init(project="Gaussian_splatting", 
                config=config_dict, 
-               group='4000-positive-run',
+               group='test',
                id=wandb.util.generate_id(),
                reinit=True)  
 
@@ -376,7 +392,9 @@ def main(cfg: DictConfig):
 
     # trainer.on_evaluate_step()
     trainer.train()
-    trainer.post_run_step(debug_pos_only=cfg.debug_pos_only, debug_neg_only=cfg.debug_neg_only)
+    trainer.post_run_step(debug_pos_only=cfg.debug_pos_only, 
+                          debug_neg_only=cfg.debug_neg_only,
+                          debug_neg_max=cfg.debug_neg_max)
 
     # Finish wandb run
     wandb.finish()
@@ -420,6 +438,9 @@ def manual_debug(cfg: DictConfig):
         use_wandb=False
     )
     trainer.run_all_cameras()
+
+    # if not cfg.save_model:
+    # trainer.save_model()
 
 
 if __name__ == "__main__":

@@ -123,7 +123,7 @@ def build_covariance_3d_projected(
     # truncate the influences of gaussians far outside the frustum.
     tx = (t[..., 0] / t[..., 2]).clip(min=-tan_fovx*1.3, max=tan_fovx*1.3) * t[..., 2]
     ty = (t[..., 1] / t[..., 2]).clip(min=-tan_fovy*1.3, max=tan_fovy*1.3) * t[..., 2]
-    tz = t[..., 2]
+    tz = torch.norm(t, dim=-1)
 
     # we need to get the transformed covariance first
     # to do so we get the view matrix and transform the cov3d to be on the 
@@ -147,7 +147,7 @@ def build_covariance_3d_projected(
     
     # add low pass filter here according to E.q. 32
     filter = torch.eye(3,3).to(cov3d_proj) * 0.3
-    return cov3d_proj + filter[None]
+    return cov3d_proj + filter[None], tz
 
 def projection_ndc(points, viewmatrix, projmatrix):
     points_o = homogeneous(points) # object space
@@ -191,7 +191,8 @@ class GaussRenderer(nn.Module):
     >>> out = gaussRender(pc=gaussModel, camera=camera)
     """
 
-    def __init__(self, active_sh_degree=3, white_bkgd=True, negative_gaussian=False, render_positive_as_well= False, render_negatives_only=False, **kwargs):
+    def __init__(self, active_sh_degree=3, white_bkgd=True, negative_gaussian=False, render_positive_as_well= False, render_negatives_only=False,
+                 render_with_negative_max_opacity=False, **kwargs):
         super(GaussRenderer, self).__init__()
         self.active_sh_degree = active_sh_degree
         self.debug = False
@@ -200,6 +201,7 @@ class GaussRenderer(nn.Module):
         self.negative_gaussian = negative_gaussian
         self._render_positive_as_well = negative_gaussian and render_positive_as_well
         self._render_negatives_only = negative_gaussian and render_negatives_only
+        self._render_with_negative_max_opacity = negative_gaussian and render_with_negative_max_opacity
     
 
     # Getter for 'render_positive_as_well'
@@ -221,6 +223,17 @@ class GaussRenderer(nn.Module):
     @render_negatives_only.setter
     def render_negatives_only(self, render_negatives_only):
         self._render_negatives_only = self.negative_gaussian and render_negatives_only
+    
+
+    # Getter for 'render_positive_as_well'
+    @property
+    def render_with_negative_max_opacity(self):
+        return self._render_with_negative_max_opacity
+
+    # Setter for 'render_positive_as_well'
+    @render_with_negative_max_opacity.setter
+    def render_with_negative_max_opacity(self, render_with_negative_max_opacity):
+        self._render_with_negative_max_opacity = self.negative_gaussian and render_with_negative_max_opacity
     
 
     def render(self, camera, means2D, cov3d_project, color, opacity, depths):
@@ -250,6 +263,13 @@ class GaussRenderer(nn.Module):
             self.render_depth_neg_only = torch.zeros(*self.pix_coord.shape[:2], 1).to('cuda')
             self.render_alpha_neg_only = torch.zeros(*self.pix_coord.shape[:2], 1).to('cuda')
 
+        if self._render_with_negative_max_opacity:
+            self.render_color_neg_max = torch.ones(*self.pix_coord.shape[:2], 3).to('cuda') 
+            self.render_depth_neg_max = torch.zeros(*self.pix_coord.shape[:2], 1).to('cuda')
+            self.render_alpha_neg_max = torch.zeros(*self.pix_coord.shape[:2], 1).to('cuda')
+
+
+        # TILE_SIZE = 32
         TILE_SIZE = 32
         tile_stats = {'tile_negs':0, 'tiles':0, 'negs':0, 'pos':0}
 
@@ -274,6 +294,7 @@ class GaussRenderer(nn.Module):
                 g_pos_in_tile = g_in_tile_idx[opacity[g_in_tile_idx].flatten()>0]
 
                 P = len(g_pos_in_tile)
+
                 # tile_stats['pos'] += P
 
                 # get the tile coordinates and sort the positive gaussians by depth
@@ -297,23 +318,27 @@ class GaussRenderer(nn.Module):
                     + dx[:,:,0]*dx[:,:,1] * sorted_conic[:, 0, 1]
                     + dx[:,:,0]*dx[:,:,1] * sorted_conic[:, 1, 0]))
                 
+                alpha = (gauss_weight[..., None] * sorted_opacity[None]).clip(max=0.99) # Im P+ 1 (B P 1 old)
+
                 # Two different alphas are needed if we want to render what it would look with only positive gaussians
+                # and another one is needed to render what would like if all the negative gaussians have an opacity of -1
                 if self._render_positive_as_well:
-                    alpha = (gauss_weight[..., None] * sorted_opacity[None]).clip(max=0.99) # Im P+ 1 (B P 1 old)
-                    alpha_pos_only = copy.deepcopy(alpha)
-                else:
-                    alpha = (gauss_weight[..., None] * sorted_opacity[None]).clip(max=0.99) # Im P+ 1 (B P 1 old)
+                    alpha_pos_copy = copy.deepcopy(alpha)
+
+                if self._render_with_negative_max_opacity:
+                    alpha_neg_max_copy = copy.deepcopy(alpha)
+
+
                 # if and only if we have more than zero negative gaussians then we need to adjust
                 # the gaus weights based on the spatial positioning of these gaussians
 
-                #TODO: here we only need to select the negative gaussian from in_mask
                 if self.negative_gaussian:
                     g_neg_in_tile = g_in_tile_idx[opacity[g_in_tile_idx].flatten()<0]
 
                     NP = len(g_neg_in_tile)
                     # print(opacity[g_neg_in_tile].flatten())
 
-                    if(NP > 0): 
+                    if(NP > 0 and P>0): 
                         # tile_stats['negs'] += NP
                         tile_stats['tile_negs'] += 1
 
@@ -368,8 +393,6 @@ class GaussRenderer(nn.Module):
                         alpha = alpha + negative_impact_per_positive_gaussian
                         alpha = alpha.clip(min=0.0)
 
-
-                output = {}
     
                 T = torch.cat([torch.ones_like(alpha[:,:1]), 1-alpha[:,:-1]], dim=1).cumprod(dim=1)
                 acc_alpha = (alpha * T).sum(dim=1)
@@ -379,26 +402,99 @@ class GaussRenderer(nn.Module):
                 self.render_depth[h:h+TILE_SIZE, w:w+TILE_SIZE] = tile_depth.reshape(TILE_SIZE, TILE_SIZE, -1)
                 self.render_alpha[h:h+TILE_SIZE, w:w+TILE_SIZE] = acc_alpha.reshape(TILE_SIZE, TILE_SIZE, -1)
         
-                output["render"] = self.render_color
-                output["depth"] = self.render_depth
-                output["alpha"] = self.render_alpha
-                output["visiility_filter"] = radii > 0
-                output["radii"] = radii
-                output["tile_stats"] = tile_stats
+
 
 
                 if self._render_positive_as_well:
-                    T = torch.cat([torch.ones_like(alpha_pos_only[:,:1]), 1-alpha_pos_only[:,:-1]], dim=1).cumprod(dim=1)
-                    acc_alpha_pos_only = (alpha_pos_only * T).sum(dim=1)
-                    tile_color = (T * alpha_pos_only * sorted_color[None]).sum(dim=1) + (1-acc_alpha_pos_only) * (1 if self.white_bkgd else 0)
-                    tile_depth = ((T * alpha_pos_only) * sorted_depths[None,:,None]).sum(dim=1)
+                    T = torch.cat([torch.ones_like(alpha_pos_copy[:,:1]), 1-alpha_pos_copy[:,:-1]], dim=1).cumprod(dim=1)
+                    acc_alpha_pos_only = (alpha_pos_copy * T).sum(dim=1)
+                    tile_color = (T * alpha_pos_copy * sorted_color[None]).sum(dim=1) + (1-acc_alpha_pos_only) * (1 if self.white_bkgd else 0)
+                    tile_depth = ((T * alpha_pos_copy) * sorted_depths[None,:,None]).sum(dim=1)
                     self.render_color_pos_only[h:h+TILE_SIZE, w:w+TILE_SIZE] = tile_color.reshape(TILE_SIZE, TILE_SIZE, -1)
                     self.render_depth_pos_only[h:h+TILE_SIZE, w:w+TILE_SIZE] = tile_depth.reshape(TILE_SIZE, TILE_SIZE, -1)
                     self.render_alpha_pos_only[h:h+TILE_SIZE, w:w+TILE_SIZE] = acc_alpha_pos_only.reshape(TILE_SIZE, TILE_SIZE, -1)
 
-                    output["render_pos_only"] = self.render_color_pos_only
-                    output["depth_pos_only"] = self.render_depth_pos_only
-                    output["alpha_pos_only"] = self.render_alpha_pos_only
+                if self._render_with_negative_max_opacity:
+                    g_neg_in_tile = g_in_tile_idx[opacity[g_in_tile_idx].flatten()<0]
+
+                    NP = len(g_neg_in_tile)
+                    # print(opacity[g_neg_in_tile].flatten())
+
+                    if(NP > 0 and P>0): 
+                        # tile_stats['negs'] += NP
+                        tile_stats['tile_negs'] += 1
+
+                        # container for the negative gaussian impact
+                        # negative_impact_per_positive_gaussian = torch.zeros_like(alpha_neg_max_copy)
+                        negative_impact_per_positive_gaussian = torch.ones_like(alpha_neg_max_copy)
+
+                        # tile in the depth dimension
+                        N_NEGS_PER_TILE = 2
+                        depth_tile_count = math.ceil(NP / N_NEGS_PER_TILE)
+
+                        for depth_idx in range(depth_tile_count):
+                            lower = depth_idx * N_NEGS_PER_TILE
+                            upper = (depth_idx + 1) * N_NEGS_PER_TILE
+                            upper = min(upper, NP)
+                            neg_in_mask_in_depth = g_neg_in_tile[lower:upper]
+
+                            # select the negative gaussians in the tile
+                            sel_neg_means2D = means2D[neg_in_mask_in_depth]
+                            sel_neg_cov3d = cov3d_project[neg_in_mask_in_depth]
+                            sel_neg_depths = depths[neg_in_mask_in_depth]
+                            sel_neg_opacity = opacity[neg_in_mask_in_depth]
+                            neg_conic = sel_neg_cov3d.inverse() # inverse of variance
+
+                            # get the distances used for calculating the gaussian impact
+                            dx = (tile_coord[:,None,:] - sel_neg_means2D[None,:]) # Im N- 2 (N P 2 old)
+                            dx = dx.unsqueeze(1).expand(-1, P, -1, -1) # Im P+ N- 2 (N B P 2 old)
+                            dy = sorted_depths[:, None] - sel_neg_depths[None, :] # P+ N-
+                            dy = dy.unsqueeze(dim=0).unsqueeze(dim=-1) # Im(1) P+ N- 1
+                            dy = dy.expand(dx.shape[0], -1, -1, -1) # Im P+ N- 1
+                            dx = torch.cat((dx, dy), dim=-1) # Im P+ N- 3 (N B P 3 old)
+
+                            # get the negative point spread
+                            neg_gauss_weight = torch.exp(-0.5 * (
+                                dx[...,0]**2 * neg_conic[:, 0, 0] 
+                                + dx[...,1]**2 * neg_conic[:, 1, 1]
+                                + dx[...,2]**2 * neg_conic[:, 2, 2]
+                                + dx[...,0]*dx[...,1] * neg_conic[:, 0, 1]
+                                + dx[...,0]*dx[...,2] * neg_conic[:, 0, 2]
+                                + dx[...,1]*dx[...,0] * neg_conic[:, 1, 0]
+                                + dx[...,1]*dx[...,2] * neg_conic[:, 1, 2]
+                                + dx[...,2]*dx[...,0] * neg_conic[:, 2, 0]
+                                + dx[...,2]*dx[...,1] * neg_conic[:, 2, 1]
+                            )) # Im P+ N- (N B P old)
+
+
+
+                            # calculate the negative alpha of the gaussians
+                            # neg_alpha = (neg_gauss_weight[..., None]).clip(min=-0.99) # Im P+ N- 1 (N B P 1 old)
+                            # neg_alpha = neg_alpha.sum(dim=2, keepdims=False) # Im P+ 1  (B P 1 old)
+
+                            # negative_impact_per_positive_gaussian += neg_alpha # Im P+ 1
+
+                            neg_alpha = neg_gauss_weight[..., None] # Im P+ N- 1 (N B P 1 old)
+                            neg_alpha = torch.where(neg_alpha >= 0.05, 0, 1) # Im P+ N- 1 (N B P 1 old)
+                            neg_alpha = neg_alpha.prod(dim=2, keepdims=False) # Im P+ 1  (B P 1 old)
+
+                            # negative_impact_per_positive_gaussian += neg_alpha # Im P+ 1
+                            negative_impact_per_positive_gaussian *= neg_alpha # Im P+ 1
+
+                        # apply the negative gaussian alpha to the positive gaussians
+                        # alpha_neg_max_copy = alpha_neg_max_copy + negative_impact_per_positive_gaussian
+                        # alpha_neg_max_copy = alpha_neg_max_copy.clip(min=0.0)
+
+                        alpha_neg_max_copy *= negative_impact_per_positive_gaussian
+                    
+                    T = torch.cat([torch.ones_like(alpha_neg_max_copy[:,:1]), 1-alpha_neg_max_copy[:,:-1]], dim=1).cumprod(dim=1)
+                    acc_alpha = (alpha_neg_max_copy * T).sum(dim=1)
+                    tile_color = (T * alpha_neg_max_copy * sorted_color[None]).sum(dim=1) + (1-acc_alpha) * (1 if self.white_bkgd else 0)
+                    tile_depth = ((T * alpha_neg_max_copy) * sorted_depths[None,:,None]).sum(dim=1)
+                    self.render_color_neg_max[h:h+TILE_SIZE, w:w+TILE_SIZE] = tile_color.reshape(TILE_SIZE, TILE_SIZE, -1)
+                    self.render_depth_neg_max[h:h+TILE_SIZE, w:w+TILE_SIZE] = tile_depth.reshape(TILE_SIZE, TILE_SIZE, -1)
+                    self.render_alpha_neg_max[h:h+TILE_SIZE, w:w+TILE_SIZE] = acc_alpha.reshape(TILE_SIZE, TILE_SIZE, -1)
+
                 
                 if self._render_negatives_only:
 
@@ -437,9 +533,31 @@ class GaussRenderer(nn.Module):
                         self.render_depth_neg_only[h:h+TILE_SIZE, w:w+TILE_SIZE] = tile_depth.reshape(TILE_SIZE, TILE_SIZE, -1)
                         self.render_alpha_neg_only[h:h+TILE_SIZE, w:w+TILE_SIZE] = acc_alpha.reshape(TILE_SIZE, TILE_SIZE, -1)
 
-                    output["render_neg_only"] = self.render_color_neg_only
-                    output["depth_neg_only"] = self.render_depth_neg_only
-                    output["alpha_neg_only"] = self.render_alpha_neg_only
+
+
+        output = {}
+
+        output["render"] = self.render_color
+        output["depth"] = self.render_depth
+        output["alpha"] = self.render_alpha
+        output["visiility_filter"] = radii > 0
+        output["radii"] = radii
+        output["tile_stats"] = tile_stats
+
+        if self._render_positive_as_well:
+            output["render_pos_only"] = self.render_color_pos_only
+            output["depth_pos_only"] = self.render_depth_pos_only
+            output["alpha_pos_only"] = self.render_alpha_pos_only
+        
+        if self._render_negatives_only:
+            output["render_neg_only"] = self.render_color_neg_only
+            output["depth_neg_only"] = self.render_depth_neg_only
+            output["alpha_neg_only"] = self.render_alpha_neg_only
+
+        if self._render_with_negative_max_opacity:
+            output["render_neg_max"] = self.render_color_neg_max
+            output["depth_neg_max"] = self.render_depth_neg_max
+            output["alpha_neg_max"] = self.render_alpha_neg_max
 
         return output
     
@@ -470,7 +588,7 @@ class GaussRenderer(nn.Module):
                     projmatrix=camera.projection_matrix)
             mean_ndc = mean_ndc[in_mask]
             mean_view = mean_view[in_mask]
-            depths = mean_view[:,2]
+            real_space_depths = mean_view[:,2]
 
         # every point should be in the view since the default is that chair
         # with a wide FOV camera angle
@@ -483,8 +601,8 @@ class GaussRenderer(nn.Module):
             cov3d = build_covariance_3d(scales, rotations)
             # print("cov3d: ", cov3d)
                 
-        with prof("build cov2d"):
-            cov3d_project = build_covariance_3d_projected(
+        with prof("build cov3d project"):
+            cov3d_project, depths = build_covariance_3d_projected(
                 mean3d=means3D, 
                 cov3d=cov3d, 
                 viewmatrix=camera.world_view_transform,
