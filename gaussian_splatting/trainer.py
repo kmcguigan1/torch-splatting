@@ -35,6 +35,7 @@ class Trainer(object):
         *, 
         sampler=None,
         results_folder='./result', 
+        viewer_folder='./viewer', 
         train_lr=1e-2,
         train_batch_size=4096,
         train_num_steps=25000,
@@ -70,6 +71,7 @@ class Trainer(object):
         self.train_batch_size = train_batch_size
 
         self.results_folder = results_folder
+        self.viewer_folder = viewer_folder
         self.gradient_accumulate_every = gradient_accumulate_every
         self.with_tracking = with_tracking
         self.step = 0
@@ -79,6 +81,9 @@ class Trainer(object):
         if self.accelerator.is_main_process:
             self.results_folder = Path(results_folder)
             self.results_folder.mkdir(exist_ok = True)
+
+            self.viewer_folder = Path(viewer_folder)
+            self.viewer_folder.mkdir(exist_ok = True)
 
         self.model, self.opt = self.accelerator.prepare(self.model, self.opt)
 

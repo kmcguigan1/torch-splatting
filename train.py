@@ -6,7 +6,7 @@ import gaussian_splatting.utils as utils
 from gaussian_splatting.trainer import Trainer
 import gaussian_splatting.utils.loss_utils as loss_utils
 from gaussian_splatting.utils.data_utils import read_all
-from gaussian_splatting.utils.camera_utils import to_viewpoint_camera
+from gaussian_splatting.utils.camera_utils import to_viewpoint_camera , camera_path_creator
 from gaussian_splatting.utils.point_utils import get_point_clouds
 from gaussian_splatting.gauss_model import GaussModel
 from gaussian_splatting.gauss_render import GaussRenderer
@@ -18,6 +18,8 @@ import contextlib
 import wandb  # Import wandb
 from omegaconf import OmegaConf
 from torch.profiler import profile, ProfilerActivity
+
+import matplotlib.pyplot as plt
 
 USE_GPU_PYTORCH = True
 USE_PROFILE = False
@@ -150,6 +152,68 @@ class GSSTrainer(Trainer):
             # Log images to wandb
             if self.use_wandb:
                 self.wandb.log({f'Image {ind}': self.wandb.Image(image_path)})
+
+    def run_circle_path_camera(self,debug_pos_only=False, debug_neg_only=False, debug_neg_max=False):
+
+        
+
+        self.gaussRender._render_positive_as_well = debug_pos_only
+        self.gaussRender._render_negatives_only = debug_neg_only
+        self.gaussRender._render_with_negative_max_opacity = debug_neg_max
+
+        camera = self.data['camera'][0]
+
+        cameras = camera_path_creator(camera)
+
+        for indx, camera in enumerate(cameras):
+
+            if USE_GPU_PYTORCH:
+                camera = to_viewpoint_camera(camera)
+            
+            out = self.gaussRender(pc=self.model, camera=camera)
+
+            rgb_pd = out['render'].detach().cpu().numpy()
+            depth_pd = out['depth'].detach().cpu().numpy()[..., 0]
+
+            rgb_list = [rgb_pd]
+            depth_list = [depth_pd]
+
+            if debug_pos_only:
+                rgb_pd_pos = out['render_pos_only'].detach().cpu().numpy()
+                depth_pd_pos = out['depth_pos_only'].detach().cpu().numpy()[..., 0]
+                rgb_diff = rgb_pd - rgb_pd_pos
+                max_diff, min_diff = rgb_diff.max(),rgb_diff.min()
+                rgb_diff = (rgb_diff-min_diff)/(max_diff-min_diff)
+                depth_diff = depth_pd - depth_pd_pos
+
+                rgb_list = rgb_list + [rgb_pd_pos, rgb_diff]
+                depth_list = depth_list + [depth_pd_pos, depth_diff]
+
+            if debug_neg_only:
+                rgb_pd_neg = out['render_neg_only'].detach().cpu().numpy()
+                depth_pd_neg = out['depth_neg_only'].detach().cpu().numpy()[..., 0]
+
+                rgb_list = rgb_list + [rgb_pd_neg]
+                depth_list = depth_list + [depth_pd_neg]
+
+            if debug_neg_max:
+                rgb_pd_neg_max = out['render_neg_max'].detach().cpu().numpy()
+                depth_pd_neg_max = out['depth_neg_max'].detach().cpu().numpy()[..., 0]
+
+                rgb_list = rgb_list + [rgb_pd_neg_max]
+                depth_list = depth_list + [depth_pd_neg_max]
+
+
+            depth_combined = np.concatenate(depth_list, axis=1)
+            depth_norm = (1 - depth_combined / depth_combined.max())
+            depth_colored = plt.get_cmap('jet')(depth_norm)[..., :3]
+            image = np.concatenate(rgb_list, axis=1)
+            image = np.concatenate([image, depth_colored], axis=0)
+            image_path = str(self.viewer_folder / f'image-{indx}-{self.step}.png')
+            utils.imwrite(image_path, image)
+
+
+
 
     def post_run_step(self, debug_pos_only=False, debug_neg_only=False, debug_neg_max=False):
         import matplotlib.pyplot as plt
@@ -392,9 +456,17 @@ def main(cfg: DictConfig):
 
     # trainer.on_evaluate_step()
     trainer.train()
-    trainer.post_run_step(debug_pos_only=cfg.debug_pos_only, 
-                          debug_neg_only=cfg.debug_neg_only,
-                          debug_neg_max=cfg.debug_neg_max)
+    with torch.no_grad():
+        trainer.post_run_step(debug_pos_only=cfg.debug_pos_only, 
+                            debug_neg_only=cfg.debug_neg_only,
+                            debug_neg_max=cfg.debug_neg_max)
+        
+        trainer.run_circle_path_camera(debug_pos_only=cfg.debug_pos_only, 
+                            debug_neg_only=cfg.debug_neg_only,
+                            debug_neg_max=cfg.debug_neg_max)
+
+
+    trainer.save('complete model')
 
     # Finish wandb run
     wandb.finish()

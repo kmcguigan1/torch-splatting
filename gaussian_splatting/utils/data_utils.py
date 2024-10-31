@@ -6,6 +6,7 @@ import numpy as np
 import torch.nn.functional as F
 from einops import rearrange
 
+
 # change from OpenGL/Blender camera axes (Y up, Z back) to COLMAP (Y down, Z forward)
 def read_camera(folder):
     """
@@ -96,3 +97,6 @@ def read_image(rgb_file, pose, intrinsic_, max_depth, resize_factor=1., white_bk
         rgb = alpha[..., None] * rgb + (1-alpha)[..., None]
 
     return rgb, depth, alpha, camera
+
+
+
