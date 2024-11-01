@@ -237,7 +237,7 @@ class GaussRenderer(nn.Module):
         self._render_with_negative_max_opacity = self.negative_gaussian and render_with_negative_max_opacity
     
 
-    def render(self, camera, means2D, cov3d_project, color, opacity, depths):
+    def render(self, camera, means2D, mean_ndc, cov3d_project, color, opacity, depths):
 
         # some equations only need the 2d version of the covariance. 
         cov2d = cov3d_project[:, :2, :2]
@@ -271,7 +271,7 @@ class GaussRenderer(nn.Module):
 
 
         # TILE_SIZE = 32
-        TILE_SIZE = 16
+        TILE_SIZE = 32
         tile_stats = {'tile_negs':0, 'tiles':0, 'negs':0, 'pos':0}
 
         tile_stats['pos'] = (opacity>0).sum()
@@ -304,6 +304,7 @@ class GaussRenderer(nn.Module):
                 tile_coord = self.pix_coord[h:h+TILE_SIZE, w:w+TILE_SIZE].flatten(0,-2)
                 sorted_depths, index = torch.sort(depths[g_pos_in_tile])
                 sorted_means2D = means2D[g_pos_in_tile][index]
+                # sorted_means2D = mean_ndc[g_pos_in_tile][index]
                 sorted_cov2d = cov2d[g_pos_in_tile][index] # P 2 2
                 sorted_conic = sorted_cov2d.inverse() # inverse of variance
                 sorted_opacity = opacity[g_pos_in_tile][index]
@@ -627,9 +628,28 @@ class GaussRenderer(nn.Module):
             rets = self.render(
                 camera = camera, 
                 means2D=means2D,
+                mean_ndc=mean_ndc,
                 cov3d_project=cov3d_project,
                 color=color,
                 opacity=opacity, 
                 depths=depths,
             )
         return rets
+    
+    def hom2pix(self,camera, coord):
+            
+        image_dims = torch.tensor([[camera.image_width,camera.image_height]]).to(coord.device)
+
+        coord_pix = ((coord + 1) * camera.image_width - 1.0) * 0.5
+            
+        return coord_pix
+    
+
+    def pix2hom(self,camera, coord_pix):
+            
+        image_dims = torch.tensor([[camera.image_width,camera.image_height]]).to(coord_pix.device)
+
+        coord = (2*coord_pix+1)/image_dims-1
+            
+        return coord
+

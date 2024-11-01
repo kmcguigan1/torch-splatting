@@ -576,5 +576,5 @@ def manual_debug_load_model(cfg: DictConfig):
                             debug_neg_max=cfg.debug_neg_max)
 
 if __name__ == "__main__":
-    manual_debug_load_model()
-    # main()
+    # manual_debug_load_model()
+    main()
