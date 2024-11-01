@@ -121,6 +121,7 @@ def build_covariance_3d_projected(
     t = (mean3d @ viewmatrix[:3,:3]) + viewmatrix[-1:,:3]
 
     # truncate the influences of gaussians far outside the frustum.
+    # set gradient to zero of gaussians outside fov
     tx = (t[..., 0] / t[..., 2]).clip(min=-tan_fovx*1.3, max=tan_fovx*1.3) * t[..., 2]
     ty = (t[..., 1] / t[..., 2]).clip(min=-tan_fovy*1.3, max=tan_fovy*1.3) * t[..., 2]
     tz = torch.norm(t, dim=-1)
@@ -270,7 +271,7 @@ class GaussRenderer(nn.Module):
 
 
         # TILE_SIZE = 32
-        TILE_SIZE = 32
+        TILE_SIZE = 16
         tile_stats = {'tile_negs':0, 'tiles':0, 'negs':0, 'pos':0}
 
         tile_stats['pos'] = (opacity>0).sum()
@@ -583,6 +584,7 @@ class GaussRenderer(nn.Module):
         
         with prof("positive projection"):
             # get the positive projections
+            # this projection accounts for focal length and stuff
             mean_ndc, mean_view, in_mask = projection_ndc(means3D, 
                     viewmatrix=camera.world_view_transform, 
                     projmatrix=camera.projection_matrix)
@@ -613,6 +615,8 @@ class GaussRenderer(nn.Module):
             
             # print("cov2d: ", cov2d)
 
+            # mean_coord_x = ((mean_ndc[..., 0] + 1) * camera.image_width - 1.0) * 0.5
+            # mean_coord_y = ((mean_ndc[..., 1] + 1) * camera.image_height - 1.0) * 0.5
             mean_coord_x = ((mean_ndc[..., 0] + 1) * camera.image_width - 1.0) * 0.5
             mean_coord_y = ((mean_ndc[..., 1] + 1) * camera.image_height - 1.0) * 0.5
             means2D = torch.stack([mean_coord_x, mean_coord_y], dim=-1)

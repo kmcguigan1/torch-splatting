@@ -126,6 +126,34 @@ class GaussModel(nn.Module):
         return self
 
 
+    def add_gaussians(self):
+
+        xyz = torch.tensor([[0.,0.,0.]])
+        scaling = torch.tensor([[0.001,0.01,0.001]])
+        rotation = torch.tensor([[1.,0.,0., 0.],])
+        colors = torch.tensor([[0,0,0]])
+        opacity = torch.tensor([[-0.9,]])
+
+        scaling = self.scaling_inverse_activation(scaling)
+        colors = self.inverse_color_activation(colors)
+        opacity = self.inverse_opacity_activation(opacity)
+
+        xyz = nn.Parameter(xyz.requires_grad_(True)).to(device="cuda")
+        colors = nn.Parameter(colors.contiguous().requires_grad_(True)).to(device="cuda")
+        scaling = nn.Parameter(scaling.requires_grad_(True)).to(device="cuda")
+        rotation = nn.Parameter(rotation.requires_grad_(True)).to(device="cuda")
+        opacity = nn.Parameter(opacity.requires_grad_(True)).to(device="cuda")
+        max_radii2D = torch.zeros((xyz.shape[0]), device="cuda")
+
+
+        self._xyz = nn.Parameter(torch.cat((self._xyz, xyz)), requires_grad=True)
+        self._colors = nn.Parameter(torch.cat((self._colors, colors)), requires_grad=True)
+        self._scaling = nn.Parameter(torch.cat((self._scaling, scaling)), requires_grad=True)
+        self._rotation = nn.Parameter(torch.cat((self._rotation, rotation)), requires_grad=True)
+        self._opacity = nn.Parameter(torch.cat((self._opacity, opacity)), requires_grad=True)
+        self.max_radii2D = torch.cat((self.max_radii2D, max_radii2D))
+
+        return self
 
     def create_from_pcd(self, pcd:PointCloud):
         """

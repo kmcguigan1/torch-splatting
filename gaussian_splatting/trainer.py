@@ -112,17 +112,18 @@ class Trainer(object):
 
         torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
 
-    def load(self, milestone):
+    def load(self, folder):
         if not self.accelerator.is_local_main_process:
             return
             
         accelerator = self.accelerator
         device = accelerator.device
 
-        data = torch.load(str(self.results_folder / f'model-{milestone}.pt'), map_location=device)
+        data = torch.load(folder, map_location=device)
 
+        data['model']['_opacity'] = torch.arctanh(torch.sigmoid(data['model']['_opacity']))
         model = self.accelerator.unwrap_model(self.model)
-        model.load_state_dict(data['model'])
+        self.model.load_state_dict(data['model'])
 
         self.step = data['step']
         self.opt.load_state_dict(data['opt'])

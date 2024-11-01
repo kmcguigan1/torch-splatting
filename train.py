@@ -514,7 +514,67 @@ def manual_debug(cfg: DictConfig):
     # if not cfg.save_model:
     # trainer.save_model()
 
+@hydra.main(config_path="config", config_name="config")
+def manual_debug_load_model(cfg: DictConfig):
+    device = 'cuda'
+
+    # Get the original working directory
+    original_cwd = get_original_cwd()
+    print("Original Working Directory:", original_cwd)
+    print("Current Working Directory:", os.getcwd())
+
+    # Convert cfg to a regular dictionary
+    config_dict = OmegaConf.to_container(cfg, resolve=True)
+
+    folder = os.path.join(original_cwd, 'B075X65R3X')
+    data = read_all(folder, resize_factor=0.25)
+    data = {k: v.to(device) for k, v in data.items()}
+    data['depth_range'] = torch.Tensor([[1,3]]*len(data['rgb'])).to(device)
+
+    # Call the set_seed function with a fixed seed value
+    set_seed(cfg.seed)
+
+    # Set the current device
+    torch.cuda.set_device(0)
+
+    points = get_point_clouds(data['camera'], data['depth'], data['alpha'], data['rgb'])
+    raw_points = points.random_sample(cfg.number_guassian)
+    # raw_points.write_ply(open('points.ply', 'wb'))
+
+    gaussModel = GaussModel(debug=False, negative_gaussian=cfg.negative_gaussian)
+    gaussModel.create_from_pcd(pcd=raw_points)
+
+
+    render_kwargs = {
+        'white_bkgd': True,
+        'negative_gaussian': cfg.negative_gaussian
+    }
+
+    results_folder = 'result/test'
+    os.makedirs(results_folder, exist_ok=True)
+    trainer = GSSTrainer(model=gaussModel, 
+        data=data,
+        train_batch_size=1, 
+        train_num_steps=1,
+        i_image=1,
+        train_lr=1e-3, 
+        amp=False,
+        fp16=True,
+        results_folder=results_folder,
+        render_kwargs=render_kwargs,
+        use_wandb=False
+    )
+
+
+    trainer.load('/home/fernando/torch-splatting/outputs/2024-10-30/20-50-45/result/test/model-complete model.pt')
+
+    trainer.model.add_gaussians()
+
+    with torch.no_grad(): 
+        trainer.run_circle_path_camera(debug_pos_only=cfg.debug_pos_only, 
+                            debug_neg_only=cfg.debug_neg_only,
+                            debug_neg_max=cfg.debug_neg_max)
 
 if __name__ == "__main__":
-    # manual_debug()
-    main()
+    manual_debug_load_model()
+    # main()
