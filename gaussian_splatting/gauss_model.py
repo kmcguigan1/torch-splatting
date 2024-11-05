@@ -129,7 +129,7 @@ class GaussModel(nn.Module):
     def add_gaussians(self):
 
         xyz = torch.tensor([[0.,0.,0.]])
-        scaling = torch.tensor([[0.001,0.01,0.001]])
+        scaling = torch.tensor([[0.4,0.1,0.1]])
         rotation = torch.tensor([[1.,0.,0., 0.],])
         colors = torch.tensor([[0,0,0]])
         opacity = torch.tensor([[-0.9,]])

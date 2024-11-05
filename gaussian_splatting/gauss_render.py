@@ -144,11 +144,13 @@ def build_covariance_3d_projected(
     J[..., 2, 0] = tx / t.norm(dim=-1) # discard
     J[..., 2, 1] = ty / t.norm(dim=-1) # discard
     J[..., 2, 2] = tz / t.norm(dim=-1) # discard
-    cov3d_proj = J @ W @ cov3d @ W.T @ J.permute(0,2,1)
+    
+    cov3d_eye =  W @ cov3d @ W.T
+    cov3d_proj = J @ cov3d_eye @ J.permute(0,2,1)
     
     # add low pass filter here according to E.q. 32
     filter = torch.eye(3,3).to(cov3d_proj) * 0.3
-    return cov3d_proj + filter[None], tz
+    return cov3d_proj + filter[None], cov3d_eye, tz
 
 def projection_ndc(points, viewmatrix, projmatrix):
     points_o = homogeneous(points) # object space
@@ -237,7 +239,7 @@ class GaussRenderer(nn.Module):
         self._render_with_negative_max_opacity = self.negative_gaussian and render_with_negative_max_opacity
     
 
-    def render(self, camera, means2D, mean_ndc, cov3d_project, color, opacity, depths):
+    def render(self, camera, means2D, cov3d_project, cov3d_eye, color, opacity, depths, depths_g):
 
         # some equations only need the 2d version of the covariance. 
         cov2d = cov3d_project[:, :2, :2]
@@ -304,7 +306,6 @@ class GaussRenderer(nn.Module):
                 tile_coord = self.pix_coord[h:h+TILE_SIZE, w:w+TILE_SIZE].flatten(0,-2)
                 sorted_depths, index = torch.sort(depths[g_pos_in_tile])
                 sorted_means2D = means2D[g_pos_in_tile][index]
-                # sorted_means2D = mean_ndc[g_pos_in_tile][index]
                 sorted_cov2d = cov2d[g_pos_in_tile][index] # P 2 2
                 sorted_conic = sorted_cov2d.inverse() # inverse of variance
                 sorted_opacity = opacity[g_pos_in_tile][index]
@@ -314,6 +315,7 @@ class GaussRenderer(nn.Module):
                 # pixel space, then calculate the gaussian weight
                 # each pixel, each gaussian, xy
                 dx = (tile_coord[:,None,:] - sorted_means2D[None,:]) # Im P+ 2 (B P 2 old)
+
                 gauss_weight = torch.exp(-0.5 * (
                     dx[:, :, 0]**2 * sorted_conic[:, 0, 0] 
                     + dx[:, :, 1]**2 * sorted_conic[:, 1, 1]
@@ -359,13 +361,18 @@ class GaussRenderer(nn.Module):
 
                             # select the negative gaussians in the tile
                             sel_neg_means2D = means2D[neg_in_mask_in_depth]
-                            sel_neg_cov3d = cov3d_project[neg_in_mask_in_depth]
+                            sel_neg_cov3d = cov3d_eye[neg_in_mask_in_depth]
                             sel_neg_depths = depths[neg_in_mask_in_depth]
                             sel_neg_opacity = opacity[neg_in_mask_in_depth]
                             neg_conic = sel_neg_cov3d.inverse() # inverse of variance
 
                             # get the distances used for calculating the gaussian impact
-                            dx = (tile_coord[:,None,:] - sel_neg_means2D[None,:]) # Im N- 2 (N P 2 old)
+                            
+                            tile_coord_neg_shape = tile_coord[:,None,:].expand(-1,len(sel_neg_depths), -1) 
+                            tile_coord_eye = self.window2eye(camera, tile_coord_neg_shape, sel_neg_depths)
+                            sel_neg_means2D_eye = self.window2eye(camera, sel_neg_means2D[None,:], sel_neg_depths)
+
+                            dx = (tile_coord_eye - sel_neg_means2D_eye) # Im N- 2 (N P 2 old)
                             dx = dx.unsqueeze(1).expand(-1, P, -1, -1) # Im P+ N- 2 (N B P 2 old)
                             dy = sorted_depths[:, None] - sel_neg_depths[None, :] # P+ N-
                             dy = dy.unsqueeze(dim=0).unsqueeze(dim=-1) # Im(1) P+ N- 1
@@ -442,13 +449,17 @@ class GaussRenderer(nn.Module):
 
                             # select the negative gaussians in the tile
                             sel_neg_means2D = means2D[neg_in_mask_in_depth]
-                            sel_neg_cov3d = cov3d_project[neg_in_mask_in_depth]
+                            sel_neg_cov3d = cov3d_eye[neg_in_mask_in_depth]
                             sel_neg_depths = depths[neg_in_mask_in_depth]
                             sel_neg_opacity = opacity[neg_in_mask_in_depth]
                             neg_conic = sel_neg_cov3d.inverse() # inverse of variance
 
                             # get the distances used for calculating the gaussian impact
-                            dx = (tile_coord[:,None,:] - sel_neg_means2D[None,:]) # Im N- 2 (N P 2 old)
+                            tile_coord_neg_shape = tile_coord[:,None,:].expand(-1,len(sel_neg_depths), -1) 
+                            tile_coord_eye = self.window2eye(camera, tile_coord_neg_shape, sel_neg_depths)
+                            sel_neg_means2D_eye = self.window2eye(camera, sel_neg_means2D[None,:], sel_neg_depths)
+
+                            dx = (tile_coord_eye - sel_neg_means2D_eye) # Im N- 2 (N P 2 old)
                             dx = dx.unsqueeze(1).expand(-1, P, -1, -1) # Im P+ N- 2 (N B P 2 old)
                             dy = sorted_depths[:, None] - sel_neg_depths[None, :] # P+ N-
                             dy = dy.unsqueeze(dim=0).unsqueeze(dim=-1) # Im(1) P+ N- 1
@@ -605,7 +616,7 @@ class GaussRenderer(nn.Module):
             # print("cov3d: ", cov3d)
                 
         with prof("build cov3d project"):
-            cov3d_project, depths = build_covariance_3d_projected(
+            cov3d_project, cov3d_eye, depths = build_covariance_3d_projected(
                 mean3d=means3D, 
                 cov3d=cov3d, 
                 viewmatrix=camera.world_view_transform,
@@ -620,6 +631,14 @@ class GaussRenderer(nn.Module):
             # mean_coord_y = ((mean_ndc[..., 1] + 1) * camera.image_height - 1.0) * 0.5
             mean_coord_x = ((mean_ndc[..., 0] + 1) * camera.image_width - 1.0) * 0.5
             mean_coord_y = ((mean_ndc[..., 1] + 1) * camera.image_height - 1.0) * 0.5
+            # mean_coord_z = ((mean_ndc[..., 2] + 1) * camera.image_width - 1.0) * 0.5
+
+            # max_depth = torch.max(real_space_depths)
+            # min_depth = torch.min(real_space_depths)
+
+            # depths_g = (real_space_depths-min_depth)/(max_depth-min_depth)*camera.image_width/2
+            # depths_g = (2*real_space_depths-(max_depth+min_depth))/(max_depth-min_depth)*50
+            depths_g = depths*4
             means2D = torch.stack([mean_coord_x, mean_coord_y], dim=-1)
             # print("means2d: ", means2D)
         
@@ -628,15 +647,16 @@ class GaussRenderer(nn.Module):
             rets = self.render(
                 camera = camera, 
                 means2D=means2D,
-                mean_ndc=mean_ndc,
                 cov3d_project=cov3d_project,
+                cov3d_eye=cov3d_eye,
                 color=color,
                 opacity=opacity, 
-                depths=depths,
+                depths=real_space_depths,
+                depths_g=depths_g,
             )
         return rets
     
-    def hom2pix(self,camera, coord):
+    def ndc2window(self,camera, coord):
             
         image_dims = torch.tensor([[camera.image_width,camera.image_height]]).to(coord.device)
 
@@ -645,7 +665,7 @@ class GaussRenderer(nn.Module):
         return coord_pix
     
 
-    def pix2hom(self,camera, coord_pix):
+    def window2ndc(self,camera, coord_pix):
             
         image_dims = torch.tensor([[camera.image_width,camera.image_height]]).to(coord_pix.device)
 
@@ -653,3 +673,14 @@ class GaussRenderer(nn.Module):
             
         return coord
 
+
+
+    def window2eye(self, camera, means_wc, z_eye):
+        means_ndc = self.window2ndc(camera, means_wc)
+        means_clip = means_ndc*z_eye
+        P = camera.projection_matrix
+        P_inv = torch.linalg.inv(P[:2,:2])
+
+        means_eye = torch.einsum('ij,INj->INi',P_inv,means_clip)
+
+        return means_eye
