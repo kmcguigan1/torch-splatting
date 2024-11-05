@@ -17,12 +17,12 @@ def homogeneous(points):
     return torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
 
 
-def build_rotation(r):
+def build_rotation(r,device='cuda:0'):
     norm = torch.sqrt(r[:,0]*r[:,0] + r[:,1]*r[:,1] + r[:,2]*r[:,2] + r[:,3]*r[:,3])
 
     q = r / norm[:, None]
 
-    R = torch.zeros((q.size(0), 3, 3), device='cuda')
+    R = torch.zeros((q.size(0), 3, 3), device=device)
 
     r = q[:, 0]
     x = q[:, 1]
@@ -42,9 +42,9 @@ def build_rotation(r):
 
 
 
-def build_scaling_rotation(s, r):
-    L = torch.zeros((s.shape[0], 3, 3), dtype=torch.float, device="cuda")
-    R = build_rotation(r)
+def build_scaling_rotation(s, r,device='cuda:0'):
+    L = torch.zeros((s.shape[0], 3, 3), dtype=torch.float, device=device)
+    R = build_rotation(r, device)
 
     L[:,0,0] = s[:,0]
     L[:,1,1] = s[:,1]
@@ -54,8 +54,8 @@ def build_scaling_rotation(s, r):
     return L
 
 
-def strip_lowerdiag(L):
-    uncertainty = torch.zeros((L.shape[0], 6), dtype=torch.float, device="cuda")
+def strip_lowerdiag(L,device="cuda:0"):
+    uncertainty = torch.zeros((L.shape[0], 6), dtype=torch.float, device=device)
     uncertainty[:, 0] = L[:, 0, 0]
     uncertainty[:, 1] = L[:, 0, 1]
     uncertainty[:, 2] = L[:, 0, 2]
@@ -65,11 +65,11 @@ def strip_lowerdiag(L):
     return uncertainty
 
 
-def strip_symmetric(sym):
-    return strip_lowerdiag(sym)
+def strip_symmetric(sym, device="cuda:0"):
+    return strip_lowerdiag(sym, device)
 
-def build_covariance_3d(s, r):
-    L = build_scaling_rotation(s, r)
+def build_covariance_3d(s, r, device="cuda:0"):
+    L = build_scaling_rotation(s, r, device)
     actual_covariance = L @ L.transpose(1, 2)
     return actual_covariance
     # symm = strip_symmetric(actual_covariance)
@@ -195,17 +195,18 @@ class GaussRenderer(nn.Module):
     """
 
     def __init__(self, active_sh_degree=3, white_bkgd=True, negative_gaussian=False, render_positive_as_well= False, render_negatives_only=False,
-                 render_with_negative_max_opacity=False, **kwargs):
+                 render_with_negative_max_opacity=False, device='cuda:0', **kwargs):
         super(GaussRenderer, self).__init__()
+        self.device = device
         self.active_sh_degree = active_sh_degree
         self.debug = False
         self.white_bkgd = white_bkgd
-        self.pix_coord = torch.stack(torch.meshgrid(torch.arange(128), torch.arange(128), indexing='xy'), dim=-1).to('cuda')
+        self.pix_coord = torch.stack(torch.meshgrid(torch.arange(128), torch.arange(128), indexing='xy'), dim=-1).to(self.device)
         self.negative_gaussian = negative_gaussian
         self._render_positive_as_well = negative_gaussian and render_positive_as_well
         self._render_negatives_only = negative_gaussian and render_negatives_only
         self._render_with_negative_max_opacity = negative_gaussian and render_with_negative_max_opacity
-    
+
 
     # Getter for 'render_positive_as_well'
     @property
@@ -251,25 +252,25 @@ class GaussRenderer(nn.Module):
         # print("rect: ", rect)
         
         
-        self.render_color = torch.ones(*self.pix_coord.shape[:2], 3).to('cuda')
-        self.render_depth = torch.zeros(*self.pix_coord.shape[:2], 1).to('cuda')
-        self.render_alpha = torch.zeros(*self.pix_coord.shape[:2], 1).to('cuda')
+        self.render_color = torch.ones(*self.pix_coord.shape[:2], 3).to(self.device)
+        self.render_depth = torch.zeros(*self.pix_coord.shape[:2], 1).to(self.device)
+        self.render_alpha = torch.zeros(*self.pix_coord.shape[:2], 1).to(self.device)
 
         if self._render_positive_as_well:
-            self.render_color_pos_only = torch.ones(*self.pix_coord.shape[:2], 3).to('cuda') 
-            self.render_depth_pos_only = torch.zeros(*self.pix_coord.shape[:2], 1).to('cuda')
-            self.render_alpha_pos_only = torch.zeros(*self.pix_coord.shape[:2], 1).to('cuda')
+            self.render_color_pos_only = torch.ones(*self.pix_coord.shape[:2], 3).to(self.device) 
+            self.render_depth_pos_only = torch.zeros(*self.pix_coord.shape[:2], 1).to(self.device)
+            self.render_alpha_pos_only = torch.zeros(*self.pix_coord.shape[:2], 1).to(self.device)
 
 
         if self._render_negatives_only:
-            self.render_color_neg_only = torch.ones(*self.pix_coord.shape[:2], 3).to('cuda') 
-            self.render_depth_neg_only = torch.zeros(*self.pix_coord.shape[:2], 1).to('cuda')
-            self.render_alpha_neg_only = torch.zeros(*self.pix_coord.shape[:2], 1).to('cuda')
+            self.render_color_neg_only = torch.ones(*self.pix_coord.shape[:2], 3).to(self.device) 
+            self.render_depth_neg_only = torch.zeros(*self.pix_coord.shape[:2], 1).to(self.device)
+            self.render_alpha_neg_only = torch.zeros(*self.pix_coord.shape[:2], 1).to(self.device)
 
         if self._render_with_negative_max_opacity:
-            self.render_color_neg_max = torch.ones(*self.pix_coord.shape[:2], 3).to('cuda') 
-            self.render_depth_neg_max = torch.zeros(*self.pix_coord.shape[:2], 1).to('cuda')
-            self.render_alpha_neg_max = torch.zeros(*self.pix_coord.shape[:2], 1).to('cuda')
+            self.render_color_neg_max = torch.ones(*self.pix_coord.shape[:2], 3).to(self.device) 
+            self.render_depth_neg_max = torch.zeros(*self.pix_coord.shape[:2], 1).to(self.device)
+            self.render_alpha_neg_max = torch.zeros(*self.pix_coord.shape[:2], 1).to(self.device)
 
 
         # TILE_SIZE = 32
@@ -488,7 +489,7 @@ class GaussRenderer(nn.Module):
                             # negative_impact_per_positive_gaussian += neg_alpha # Im P+ 1
 
                             neg_alpha = neg_gauss_weight[..., None] # Im P+ N- 1 (N B P 1 old)
-                            neg_alpha = torch.where(neg_alpha >= 0.05, 0, 1) # Im P+ N- 1 (N B P 1 old)
+                            neg_alpha = torch.where(neg_alpha >= 0.01, 0, 1) # Im P+ N- 1 (N B P 1 old)
                             neg_alpha = neg_alpha.prod(dim=2, keepdims=False) # Im P+ 1  (B P 1 old)
 
                             # negative_impact_per_positive_gaussian += neg_alpha # Im P+ 1
@@ -612,7 +613,7 @@ class GaussRenderer(nn.Module):
         #     color = self.build_color(means3D=means3D, shs=shs, camera=camera)
         
         with prof("build cov3d"):
-            cov3d = build_covariance_3d(scales, rotations)
+            cov3d = build_covariance_3d(scales, rotations, self.device)
             # print("cov3d: ", cov3d)
                 
         with prof("build cov3d project"):

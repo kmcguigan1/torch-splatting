@@ -48,7 +48,7 @@ class GaussModel(nn.Module):
 
         self.rotation_activation = torch.nn.functional.normalize
     
-    def __init__(self, debug=False, negative_gaussian=False):
+    def __init__(self, device = "cuda:0", debug=False, negative_gaussian=False):
         super(GaussModel, self).__init__()
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
@@ -58,6 +58,7 @@ class GaussModel(nn.Module):
         self._opacity = torch.empty(0)
         self.debug = debug
         self.negative_gaussian = negative_gaussian
+        self.device=device
         self.setup_functions()
 
     def create_manually(self):
@@ -101,7 +102,7 @@ class GaussModel(nn.Module):
         self._scaling = nn.Parameter(scaling.requires_grad_(True))
         self._rotation = nn.Parameter(rotation.requires_grad_(True))
         self._opacity = nn.Parameter(opacity.requires_grad_(True))
-        self.max_radii2D = torch.zeros((self._xyz.shape[0]), device="cuda")
+        self.max_radii2D = torch.zeros((self._xyz.shape[0]), device=self.device)
 
 
 
@@ -138,12 +139,12 @@ class GaussModel(nn.Module):
         colors = self.inverse_color_activation(colors)
         opacity = self.inverse_opacity_activation(opacity)
 
-        xyz = nn.Parameter(xyz.requires_grad_(True)).to(device="cuda")
-        colors = nn.Parameter(colors.contiguous().requires_grad_(True)).to(device="cuda")
-        scaling = nn.Parameter(scaling.requires_grad_(True)).to(device="cuda")
-        rotation = nn.Parameter(rotation.requires_grad_(True)).to(device="cuda")
-        opacity = nn.Parameter(opacity.requires_grad_(True)).to(device="cuda")
-        max_radii2D = torch.zeros((xyz.shape[0]), device="cuda")
+        xyz = nn.Parameter(xyz.requires_grad_(True)).to(device=self.device)
+        colors = nn.Parameter(colors.contiguous().requires_grad_(True)).to(device=self.device)
+        scaling = nn.Parameter(scaling.requires_grad_(True)).to(device=self.device)
+        rotation = nn.Parameter(rotation.requires_grad_(True)).to(device=self.device)
+        opacity = nn.Parameter(opacity.requires_grad_(True)).to(device=self.device)
+        max_radii2D = torch.zeros((xyz.shape[0]), device=self.device)
 
 
         self._xyz = nn.Parameter(torch.cat((self._xyz, xyz)), requires_grad=True)
@@ -162,22 +163,22 @@ class GaussModel(nn.Module):
         points = pcd.coords
         colors = pcd.select_channels(['R', 'G', 'B']) / 255.
 
-        fused_point_cloud = torch.tensor(np.asarray(points)).float().cuda()
-        colors = torch.tensor(np.asarray(colors)).float().cuda()
+        fused_point_cloud = torch.tensor(np.asarray(points)).float().to(self.device)
+        colors = torch.tensor(np.asarray(colors)).float().to(self.device)
         colors = self.inverse_color_activation(colors)
 
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
-        dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(points)).float().cuda()), 0.0000001) 
+        dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(points)).float().to(self.device)), 0.0000001) 
         scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
-        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
+        rots = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
         rots[:, 0] = 1
-        opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
+        opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device=self.device))
 
         if self.debug:
             # easy for visualization
             colors = np.zeros_like(colors)
-            opacities = self.inverse_opacity_activation(0.9 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
+            opacities = self.inverse_opacity_activation(0.9 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device=self.device))
 
         # real space gaussians
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
@@ -185,7 +186,7 @@ class GaussModel(nn.Module):
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
-        self.max_radii2D = torch.zeros((self._xyz.shape[0]), device="cuda")
+        self.max_radii2D = torch.zeros((self._xyz.shape[0]), device=self.device)
 
         print(self._xyz.shape)
         print(self._colors.shape)

@@ -78,6 +78,7 @@ class GSSTrainer(Trainer):
         self.gaussRender = GaussRenderer(**kwargs.get('render_kwargs', {}))
         self.lambda_dssim = 0.2
         self.lambda_depth = 0.0
+        self.device = kwargs.get('device', 'cuda:0')
 
         # Initialize wandb logging
         self.use_wandb = kwargs.get('use_wandb', False)
@@ -398,13 +399,14 @@ class GSSTrainer(Trainer):
 @hydra.main(config_path="config", config_name="config")
 def main(cfg: DictConfig):
 
-    device = 'cuda'
-
     # Get the original working directory
     original_cwd = get_original_cwd()
     print("Original Working Directory:", original_cwd)
     print("Current Working Directory:", os.getcwd())
 
+
+    device = "cuda"
+    device = device +':'+ str(cfg.device)
     # Convert cfg to a regular dictionary
     config_dict = OmegaConf.to_container(cfg, resolve=True)
     # Initialize wandb
@@ -423,18 +425,19 @@ def main(cfg: DictConfig):
     set_seed(cfg.seed)
 
     # Set the current device
-    torch.cuda.set_device(0)
+    torch.cuda.set_device(cfg.device)
 
     points = get_point_clouds(data['camera'], data['depth'], data['alpha'], data['rgb'])
     raw_points = points.random_sample(cfg.number_guassian)
     # raw_points.write_ply(open('points.ply', 'wb'))
 
-    gaussModel = GaussModel(debug=False, negative_gaussian=cfg.negative_gaussian)
+    gaussModel = GaussModel(debug=False, negative_gaussian=cfg.negative_gaussian, device=device)
     gaussModel.create_from_pcd(pcd=raw_points)
 
     render_kwargs = {
         'white_bkgd': True,
-        'negative_gaussian': cfg.negative_gaussian
+        'negative_gaussian': cfg.negative_gaussian,
+        'device': device
     }
 
     results_folder = os.path.join(os.getcwd(), 'result/test')
@@ -451,7 +454,8 @@ def main(cfg: DictConfig):
         fp16=True,
         results_folder=results_folder,
         render_kwargs=render_kwargs,
-        use_wandb=True  # Enable wandb in the trainer
+        use_wandb=True,  # Enable wandb in the trainer
+        device=device
     )
 
     # trainer.on_evaluate_step()
@@ -474,6 +478,7 @@ def main(cfg: DictConfig):
 @hydra.main(config_path="config", config_name="config")
 def manual_debug(cfg: DictConfig):
     device = 'cuda'
+    device = device +':'+ str(cfg.device)
 
     # Get the original working directory
     original_cwd = get_original_cwd()
@@ -517,6 +522,7 @@ def manual_debug(cfg: DictConfig):
 @hydra.main(config_path="config", config_name="config")
 def manual_debug_load_model(cfg: DictConfig):
     device = 'cuda'
+    device = device +':'+ str(cfg.device)
 
     # Get the original working directory
     original_cwd = get_original_cwd()
@@ -535,7 +541,7 @@ def manual_debug_load_model(cfg: DictConfig):
     set_seed(cfg.seed)
 
     # Set the current device
-    torch.cuda.set_device(0)
+    torch.cuda.set_device(device)
 
     points = get_point_clouds(data['camera'], data['depth'], data['alpha'], data['rgb'])
     raw_points = points.random_sample(cfg.number_guassian)
